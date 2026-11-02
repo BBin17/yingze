@@ -24,8 +24,8 @@
 ```sh
 swift build --arch arm64
 swift test --arch arm64
-./Scripts/build-app.sh
-./Scripts/build-dmg.sh
+zsh ./Scripts/build-app.sh
+zsh ./Scripts/build-dmg.sh
 ```
 
 应用和磁盘映像分别生成在 `dist/影择.app` 和 `dist/影择-arm64.dmg`。打包脚本使用本机临时签名，适合本机开发测试；面向其他用户分发通常需要配置 Apple Developer 签名和公证。
