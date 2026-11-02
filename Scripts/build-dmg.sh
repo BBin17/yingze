@@ -6,7 +6,7 @@ app_path="$project_dir/dist/影择.app"
 dmg_path="$project_dir/dist/影择-arm64.dmg"
 staging_dir="$project_dir/dist/dmg-staging"
 
-"$project_dir/Scripts/build-app.sh"
+zsh "$project_dir/Scripts/build-app.sh"
 
 rm -rf "$staging_dir"
 mkdir -p "$staging_dir"
