@@ -133,6 +133,19 @@ struct ArchiveServiceTests {
         #expect(!FileManager.default.fileExists(atPath: staging.path))
     }
 
+    @Test("校验读取出错时不能当成文件结束")
+    func digestPropagatesReadFailures() throws {
+        enum SimulatedReadError: Error { case failed }
+        var reads = 0
+        #expect(throws: SimulatedReadError.self) {
+            _ = try ArchiveService.digestChunks {
+                reads += 1
+                if reads == 1 { return Data("partial".utf8) }
+                throw SimulatedReadError.failed
+            }
+        }
+    }
+
     private func makeGroup(name: String, in directory: URL, state: PickState, rating: Int = 0, color: ColorLabel = .none) throws -> PhotoGroup {
         let jpg = directory.appendingPathComponent("\(name).JPG")
         let heic = directory.appendingPathComponent("\(name).HEIC")

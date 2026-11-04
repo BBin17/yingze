@@ -28,6 +28,7 @@ enum ProjectRefreshMerger {
 
 @MainActor
 final class SessionStore: ObservableObject {
+    private var storageRecoveryBlocked = false
     @Published private(set) var session: CullSession = .empty
     @Published private(set) var projects: [ProjectSummary] = []
     @Published private(set) var currentProjectID: UUID?
@@ -586,12 +587,20 @@ final class SessionStore: ObservableObject {
     }
 
     func removeProject(_ id: UUID) {
+        guard !storageRecoveryBlocked else {
+            presentedError = "项目记录读取失败，已暂停修改以保护原记录。"
+            return
+        }
         saveTask?.cancel()
         if currentProjectID != id, currentProjectID != nil { saveNow() }
         do {
             let file = try projectSessionURL(id: id)
             if FileManager.default.fileExists(atPath: file.path) {
                 try FileManager.default.removeItem(at: file)
+            }
+            let backup = backupURL(for: file)
+            if FileManager.default.fileExists(atPath: backup.path) {
+                try FileManager.default.removeItem(at: backup)
             }
             projects.removeAll { $0.id == id }
             if currentProjectID == id {
@@ -866,9 +875,8 @@ final class SessionStore: ObservableObject {
     private func loadSavedSession() {
         do {
             let indexURL = try projectIndexURL()
-            if FileManager.default.fileExists(atPath: indexURL.path) {
-                let data = try Data(contentsOf: indexURL)
-                let index = try JSONDecoder.sessionDecoder.decode(ProjectIndex.self, from: data)
+            if FileManager.default.fileExists(atPath: indexURL.path) || FileManager.default.fileExists(atPath: backupURL(for: indexURL).path) {
+                let index: ProjectIndex = try readProtected(ProjectIndex.self, from: indexURL, notify: true)
                 projects = index.projects.sorted { $0.updatedAt > $1.updatedAt }
                 currentProjectID = index.currentProjectID
                 if let id = currentProjectID, projects.contains(where: { $0.id == id }) {
@@ -883,8 +891,10 @@ final class SessionStore: ObservableObject {
             }
             try migrateLegacySessionIfNeeded()
         } catch {
+            storageRecoveryBlocked = true
             session = .empty
             currentProjectID = nil
+            presentedError = "项目记录读取失败，已暂停写入以保护原记录。请保留 Application Support/CameraCull 文件夹并检查或恢复记录。\n\(error.localizedDescription)"
         }
     }
 
@@ -906,7 +916,7 @@ final class SessionStore: ObservableObject {
     private func refreshProjectSummariesFromSessions() {
         var changed = false
         for index in projects.indices {
-            guard let saved = try? readSession(id: projects[index].id) else { continue }
+            guard let saved = try? readSession(id: projects[index].id, notify: false) else { continue }
             let refreshed = ProjectSummary(id: projects[index].id, session: saved)
             if projects[index] != refreshed {
                 projects[index] = refreshed
@@ -937,24 +947,60 @@ final class SessionStore: ObservableObject {
         projects.sort { $0.updatedAt > $1.updatedAt }
     }
 
-    private func readSession(id: UUID) throws -> CullSession {
-        let data = try Data(contentsOf: projectSessionURL(id: id))
-        return try JSONDecoder.sessionDecoder.decode(CullSession.self, from: data)
+    private func backupURL(for url: URL) -> URL {
+        url.appendingPathExtension("backup")
+    }
+
+    private func readProtected<T: Decodable>(_ type: T.Type, from url: URL, notify: Bool) throws -> T {
+        do {
+            return try JSONDecoder.sessionDecoder.decode(type, from: Data(contentsOf: url))
+        } catch {
+            let originalError = error
+            do {
+                let value = try JSONDecoder.sessionDecoder.decode(type, from: Data(contentsOf: backupURL(for: url)))
+                if notify {
+                    presentedError = "项目记录无法正常读取，已从上一次备份恢复。备份可能不包含最近的修改；原记录仍保留，建议检查选片结果。"
+                }
+                return value
+            } catch {
+                throw originalError
+            }
+        }
+    }
+
+    private func writeProtected<T: Codable>(_ value: T, to url: URL) throws {
+        guard !storageRecoveryBlocked else {
+            throw NSError(domain: "CameraCull.ProjectStorage", code: 1, userInfo: [NSLocalizedDescriptionKey: "项目记录读取失败，已暂停写入以保护原记录。"])
+        }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONEncoder.sessionEncoder.encode(value)
+        let backup = backupURL(for: url)
+        if FileManager.default.fileExists(atPath: url.path) {
+            let oldData = try Data(contentsOf: url)
+            if (try? JSONDecoder.sessionDecoder.decode(T.self, from: oldData)) != nil {
+                try oldData.write(to: backup, options: .atomic)
+            } else {
+                // Preserve a damaged original separately and never replace a valid backup with it.
+                let damaged = url.appendingPathExtension("damaged-\(UUID().uuidString)")
+                try oldData.write(to: damaged, options: .atomic)
+            }
+        } else if !FileManager.default.fileExists(atPath: backup.path) {
+            try data.write(to: backup, options: .atomic)
+        }
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func readSession(id: UUID, notify: Bool = true) throws -> CullSession {
+        try readProtected(CullSession.self, from: projectSessionURL(id: id), notify: notify)
     }
 
     private func writeSession(_ value: CullSession, id: UUID) throws {
-        let url = try projectSessionURL(id: id)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let data = try JSONEncoder.sessionEncoder.encode(value)
-        try data.write(to: url, options: .atomic)
+        try writeProtected(value, to: projectSessionURL(id: id))
     }
 
     private func saveProjectIndex() throws {
-        let url = try projectIndexURL()
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let index = ProjectIndex(currentProjectID: currentProjectID, projects: projects)
-        let data = try JSONEncoder.sessionEncoder.encode(index)
-        try data.write(to: url, options: .atomic)
+        try writeProtected(index, to: projectIndexURL())
     }
 
     private func supportDirectory() throws -> URL {

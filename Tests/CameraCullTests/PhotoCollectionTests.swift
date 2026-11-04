@@ -258,6 +258,67 @@ struct ProjectSessionTests {
         #expect(FileManager.default.fileExists(atPath: secondJPG.path))
     }
 
+    @Test("项目会话损坏时从备份恢复并提示")
+    @MainActor
+    func restoresDamagedSessionFromBackup() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CameraCullRecovery-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("photos")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let group = PhotoGroup(id: "one", baseName: "ONE", jpegURL: nil, rawURL: nil, xmpURL: nil, captureDate: nil, pixelWidth: nil, pixelHeight: nil, rating: 4, pickState: .keep)
+        let legacy = CullSession(sourceURL: source, destinationURL: nil, projectName: "恢复测试", groups: [group], selectedGroupID: "one", updatedAt: .now)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(legacy).write(to: root.appendingPathComponent("CurrentSession.json"))
+        let initial = SessionStore(storageDirectory: root)
+        let id = try #require(initial.currentProjectID)
+        let record = root.appendingPathComponent("Projects/\(id.uuidString).json")
+        #expect(FileManager.default.fileExists(atPath: record.appendingPathExtension("backup").path))
+        try Data("invalid json".utf8).write(to: record)
+
+        let restored = SessionStore(storageDirectory: root)
+        #expect(restored.session.projectName == "恢复测试")
+        #expect(restored.session.groups.first?.rating == 4)
+        #expect(restored.presentedError?.contains("备份恢复") == true)
+        #expect(try Data(contentsOf: record) == Data("invalid json".utf8))
+    }
+
+    @Test("项目索引丢失时从备份恢复")
+    @MainActor
+    func restoresMissingIndexFromBackup() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CameraCullMissingIndex-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = CullSession(sourceURL: root, destinationURL: nil, projectName: "索引恢复", groups: [], selectedGroupID: nil, updatedAt: .now)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(legacy).write(to: root.appendingPathComponent("CurrentSession.json"))
+        let initial = SessionStore(storageDirectory: root)
+        #expect(initial.projects.count == 1)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("Projects.json"))
+        let restored = SessionStore(storageDirectory: root)
+        #expect(restored.projects.count == 1)
+        #expect(restored.session.projectName == "索引恢复")
+        #expect(restored.presentedError?.contains("备份恢复") == true)
+    }
+
+    @Test("项目索引和备份均损坏时提示并阻止覆盖")
+    @MainActor
+    func blocksWritesWhenIndexCannotBeRecovered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CameraCullBrokenIndex-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = root.appendingPathComponent("Projects.json")
+        let broken = Data("broken index".utf8)
+        try broken.write(to: index)
+        try Data("broken backup".utf8).write(to: index.appendingPathExtension("backup"))
+        let store = SessionStore(storageDirectory: root)
+        #expect(store.presentedError?.contains("暂停写入") == true)
+        store.removeProject(UUID())
+        #expect(try Data(contentsOf: index) == broken)
+    }
+
     @Test("位于末尾的当前照片仍能组成完整比较组")
     @MainActor
     func comparisonAtEndIncludesPreviousPhotos() throws {
