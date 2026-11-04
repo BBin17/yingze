@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A30000000000000000000002 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000008 /* AppIcon.icon */; };
 		A10000000000000000000001 /* ArchiveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000001 /* ArchiveService.swift */; };
 		A10000000000000000000002 /* CameraCullApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* CameraCullApp.swift */; };
 		A10000000000000000000003 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* ContentView.swift */; };
@@ -35,6 +36,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E10000000000000000000008 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		C10000000000000000000001 /* ArchiveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveService.swift; sourceTree = "<group>"; };
 		C10000000000000000000002 /* CameraCullApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCullApp.swift; sourceTree = "<group>"; };
 		C10000000000000000000003 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -75,7 +77,7 @@
 		A00000000000000000000003 /* Products */ = {isa = PBXGroup; children = (F10000000000000000000001 /* 影择.app */, F10000000000000000000002 /* 影择Tests.xctest */); name = Products; sourceTree = "<group>"; };
 		A00000000000000000000004 /* CameraCull */ = {isa = PBXGroup; children = (C10000000000000000000001, C10000000000000000000002, C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, C10000000000000000000006, C10000000000000000000007, C10000000000000000000008, C10000000000000000000009, C10000000000000000000010); name = CameraCull; path = Sources/CameraCull; sourceTree = SOURCE_ROOT; };
 		A00000000000000000000005 /* CameraCullTests */ = {isa = PBXGroup; children = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005); name = CameraCullTests; path = Tests/CameraCullTests; sourceTree = SOURCE_ROOT; };
-		A00000000000000000000006 /* Resources */ = {isa = PBXGroup; children = (E10000000000000000000001 /* Info.plist */, E10000000000000000000002 /* Yingze.icns */); name = Resources; path = Resources; sourceTree = SOURCE_ROOT; };
+		A00000000000000000000006 /* Resources */ = {isa = PBXGroup; children = (E10000000000000000000001 /* Info.plist */, E10000000000000000000002 /* Yingze.icns */, E10000000000000000000008 /* AppIcon.icon */); name = Resources; path = Resources; sourceTree = SOURCE_ROOT; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -129,7 +131,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		P10000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A30000000000000000000001 /* Yingze.icns in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		P10000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A30000000000000000000001 /* Yingze.icns in Resources */, A30000000000000000000002 /* AppIcon.icon in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 		P20000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
@@ -145,8 +147,8 @@
 /* Begin XCBuildConfiguration section */
 		Q00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; DEBUG_INFORMATION_FORMAT = dwarf; MACOSX_DEPLOYMENT_TARGET = 14.0; ONLY_ACTIVE_ARCH = YES; SDKROOT = macosx; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0;}; name = Debug; };
 		Q00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; MACOSX_DEPLOYMENT_TARGET = 14.0; ONLY_ACTIVE_ARCH = NO; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release; };
-		Q00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; ENABLE_HARDENED_RUNTIME = NO; ENABLE_TESTABILITY = YES; EXECUTABLE_NAME = CameraCull; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.local.Yingze; PRODUCT_MODULE_NAME = CameraCull; PRODUCT_NAME = "影择"; SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; SWIFT_VERSION = 5.0;}; name = Debug; };
-		Q00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; DEAD_CODE_STRIPPING = YES; ENABLE_HARDENED_RUNTIME = NO; EXECUTABLE_NAME = CameraCull; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.local.Yingze; PRODUCT_MODULE_NAME = CameraCull; PRODUCT_NAME = "影择"; SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; SWIFT_VERSION = 5.0; VALIDATE_PRODUCT = YES;}; name = Release; };
+		Q00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; ENABLE_HARDENED_RUNTIME = NO; ENABLE_TESTABILITY = YES; EXECUTABLE_NAME = CameraCull; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.local.Yingze; PRODUCT_MODULE_NAME = CameraCull; PRODUCT_NAME = "影择"; SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; SWIFT_VERSION = 5.0;}; name = Debug; };
+		Q00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; DEAD_CODE_STRIPPING = YES; ENABLE_HARDENED_RUNTIME = NO; EXECUTABLE_NAME = CameraCull; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.local.Yingze; PRODUCT_MODULE_NAME = CameraCull; PRODUCT_NAME = "影择"; SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; SWIFT_VERSION = 5.0; VALIDATE_PRODUCT = YES;}; name = Release; };
 		Q00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.local.YingzeTests; PRODUCT_MODULE_NAME = CameraCullTests; PRODUCT_NAME = "影择Tests"; SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/影择.app/Contents/MacOS/CameraCull";}; name = Debug; };
 		Q00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.local.YingzeTests; PRODUCT_MODULE_NAME = CameraCullTests; PRODUCT_NAME = "影择Tests"; SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/影择.app/Contents/MacOS/CameraCull";}; name = Release; };
 /* End XCBuildConfiguration section */
