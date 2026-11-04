@@ -260,13 +260,15 @@ actor ArchiveService {
     private func digest(_ url: URL) throws -> SHA256.Digest {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        return try Self.digestChunks { try handle.read(upToCount: 4 * 1024 * 1024) }
+    }
+
+    // Read errors must abort verification rather than be treated as end of file.
+    nonisolated static func digestChunks(_ read: () throws -> Data?) throws -> SHA256.Digest {
         var hasher = SHA256()
-        while autoreleasepool(invoking: {
-            let data = try? handle.read(upToCount: 4 * 1024 * 1024)
-            guard let data, !data.isEmpty else { return false }
+        while let data = try autoreleasepool(invoking: read), !data.isEmpty {
             hasher.update(data: data)
-            return true
-        }) {}
+        }
         return hasher.finalize()
     }
 
