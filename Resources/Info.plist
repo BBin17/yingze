@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.24.9</string>
+	<string>0.24.10</string>
 	<key>CFBundleVersion</key>
-	<string>37</string>
+	<string>38</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.photography</string>
 	<key>LSArchitecturePriority</key>
@@ -31,7 +31,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>开发者：AerChan，Zayden</string>
+	<string>开发者：BBin17</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
