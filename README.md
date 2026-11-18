@@ -48,6 +48,14 @@ zsh ./Scripts/build-dmg.sh
 
 构建产物分别位于 `dist/影择.app` 和 `dist/影择-arm64.dmg`。脚本使用本机临时签名；面向其他用户分发通常需要 Apple Developer 签名和公证。
 
+## 支持项目
+
+如果影择对你有帮助，欢迎请我喝杯咖啡 ☕。你的支持会鼓励我继续开发和维护项目，谢谢！
+
+| 微信支付 | 支付宝 |
+| :---: | :---: |
+| <img src="docs/images/donate/wechat-card.png" alt="微信支付收款码" width="320"> | <img src="docs/images/donate/alipay-card.png" alt="支付宝收款码" width="320"> |
+
 ## 许可与贡献
 
 欢迎通过 [Issues](https://github.com/BBin17/yingze/issues) 反馈问题和建议；提交代码前请阅读[贡献指南](CONTRIBUTING.md)。项目采用 [MIT License](LICENSE)，应用图标由项目作者使用 AI 生成。
