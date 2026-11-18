@@ -4,7 +4,7 @@
 
 影择把同名的 RAW、JPG、HEIC 和 XMP 整理成照片组，方便你在 Mac 上浏览、比较、评分和筛选，再把需要的照片复制到本机或已挂载的 NAS，继续修图或归档。
 
-[下载最新版](https://github.com/BBin17/yingze/releases/latest) · [使用说明书](docs/使用说明.md) · [反馈问题](https://github.com/BBin17/yingze/issues) · [参与贡献](CONTRIBUTING.md)
+[下载最新版](https://github.com/BBin17/yingze/releases/latest) · [使用说明书](docs/使用说明.md) · [反馈问题](https://github.com/BBin17/yingze/issues) · [参与贡献](CONTRIBUTING.md) · [支持项目 ☕](docs/donate.md)
 
 ## 影择能做什么
 
