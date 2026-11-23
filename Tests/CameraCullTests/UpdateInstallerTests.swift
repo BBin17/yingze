@@ -35,19 +35,43 @@ struct UpdateInstallerTests {
         #expect(try version(at: update.stagedApp) == "new")
     }
 
-    @Test("新版仍在启动时保留旧版备份")
+    @Test("无法确认新版已启动时保留旧版备份")
     @MainActor
-    func keepsBackupWhileNewAppIsStillStarting() async throws {
+    func keepsBackupWhenLaunchIsUnconfirmed() async throws {
         let update = try fixture()
         defer { try? FileManager.default.removeItem(at: update.target.deletingLastPathComponent()) }
 
         await #expect(throws: UpdateInstallError.self) {
             try await AppUpdateInstaller.replaceAndRelaunch(update) { _ in
-                throw UpdateInstallError.launchPending(update.stagedApp)
+                throw UpdateInstallError.launchUnconfirmed(update.stagedApp)
             }
         }
         #expect(try version(at: update.target) == "new")
         #expect(try version(at: update.stagedApp) == "old")
+    }
+
+    @Test("核对正在运行的签名时允许路径变化，并拒绝其他程序")
+    func matchesRunningCodeAtDifferentPath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let executable = URL(fileURLWithPath: "/bin/sleep")
+        let copy = root.appendingPathComponent(executable.lastPathComponent)
+        try FileManager.default.copyItem(at: executable, to: copy)
+        let expected = try AppCodeIdentity(at: copy)
+        let other = try AppCodeIdentity(at: URL(fileURLWithPath: "/bin/ls"))
+
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["30"]
+        try process.run()
+        defer {
+            process.terminate()
+            process.waitUntilExit()
+        }
+        #expect(expected.matches(processID: process.processIdentifier))
+        #expect(!other.matches(processID: process.processIdentifier))
     }
 
     @Test("更新重启前立即写入尚未自动保存的评分")

@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import Security
 
 enum UpdateInstallError: LocalizedError {
     case projectBusy
@@ -10,7 +11,7 @@ enum UpdateInstallError: LocalizedError {
     case toolFailed(String)
     case applicationStillRunning
     case launchFailed
-    case launchPending(URL)
+    case launchUnconfirmed(URL)
     case rollbackFailed(URL)
 
     var errorDescription: String? {
@@ -22,7 +23,7 @@ enum UpdateInstallError: LocalizedError {
         case .toolFailed(let operation): "无法\(operation)。可以打开安装包手动安装。"
         case .applicationStillRunning: "影择尚未完全退出，更新未替换应用。"
         case .launchFailed: "macOS 未能启动新版影择。"
-        case .launchPending(let backup): "新版仍在启动。旧版暂存于：\(backup.path)"
+        case .launchUnconfirmed(let backup): "暂时无法确认新版已启动。旧版暂存于：\(backup.path)"
         case .rollbackFailed(let backup): "无法自动恢复旧版。旧版暂存于：\(backup.path)"
         }
     }
@@ -30,6 +31,7 @@ enum UpdateInstallError: LocalizedError {
 
 struct AppUpdateInstaller {
     static let helperArgument = "--apply-app-update"
+    private static let installationPathArgument = "--update-installation-path"
     private static let stagingPrefix = ".yingze-update-"
 
     struct PreparedUpdate: Sendable {
@@ -45,10 +47,11 @@ struct AppUpdateInstaller {
     }
 
     static func prepare(
-        diskImage: URL, update: AvailableUpdate, installed: Bundle = .main
+        diskImage: URL, update: AvailableUpdate, installed: Bundle? = nil
     ) throws -> PreparedUpdate {
         guard let package = update.package else { throw AppUpdateError.invalidDownload }
         try AppUpdateService.verify(diskImage, package: package)
+        let installed = try installed ?? installationBundle()
         let target = installed.bundleURL.resolvingSymlinksInPath()
         let parent = target.deletingLastPathComponent()
         let manager = FileManager.default
@@ -110,7 +113,9 @@ struct AppUpdateInstaller {
     }
 
     static func startHelper(_ prepared: PreparedUpdate) throws {
-        guard let executable = Bundle.main.executableURL else { throw UpdateInstallError.unsupportedLocation }
+        guard let executable = Bundle(url: prepared.target)?.executableURL else {
+            throw UpdateInstallError.unsupportedLocation
+        }
         let process = Process()
         process.executableURL = executable
         process.arguments = [helperArgument, prepared.directory.path, prepared.version, String(getpid())]
@@ -149,8 +154,8 @@ struct AppUpdateInstaller {
             }
             prepared.discard()
             return 0
-        } catch UpdateInstallError.launchPending(let backup) {
-            showNotice("新版仍在启动", message: UpdateInstallError.launchPending(backup).localizedDescription)
+        } catch UpdateInstallError.launchUnconfirmed(let backup) {
+            showNotice("更新状态待确认", message: UpdateInstallError.launchUnconfirmed(backup).localizedDescription)
         } catch UpdateInstallError.rollbackFailed(let backup) {
             showNotice("更新未完成", message: UpdateInstallError.rollbackFailed(backup).localizedDescription)
         } catch {
@@ -170,8 +175,8 @@ struct AppUpdateInstaller {
         try swap(prepared.target, prepared.stagedApp)
         do {
             try await launch(prepared.target)
-        } catch UpdateInstallError.launchPending(let backup) {
-            throw UpdateInstallError.launchPending(backup)
+        } catch UpdateInstallError.launchUnconfirmed(let backup) {
+            throw UpdateInstallError.launchUnconfirmed(backup)
         } catch {
             do {
                 try swap(prepared.target, prepared.stagedApp)
@@ -197,32 +202,60 @@ struct AppUpdateInstaller {
         throw UpdateInstallError.applicationStillRunning
     }
 
+    private static func installationBundle() throws -> Bundle {
+        let running = Bundle.main
+        guard try running.bundleURL.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly == true else {
+            return running
+        }
+
+        // Launch Services may run the app from a read-only location. Use the path
+        // supplied by the updater only if it contains the same signed code.
+        let arguments = CommandLine.arguments
+        guard arguments.count == 3, arguments[1] == installationPathArgument,
+              arguments[2].hasPrefix("/"),
+              let installed = Bundle(url: URL(fileURLWithPath: arguments[2], isDirectory: true)),
+              installed.bundleIdentifier == running.bundleIdentifier,
+              let identity = try? AppCodeIdentity(at: installed.bundleURL),
+              identity.matches(processID: getpid())
+        else { throw UpdateInstallError.unsupportedLocation }
+        return installed
+    }
+
     @MainActor
     private static func isRunning(at target: URL, bundleID: String?) -> Bool {
         guard let bundleID else { return false }
+        let identity = try? AppCodeIdentity(at: target)
         return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).contains {
-            !$0.isTerminated && $0.processIdentifier != getpid() &&
-                $0.bundleURL?.resolvingSymlinksInPath().path == target.path
+            guard !$0.isTerminated, $0.processIdentifier != getpid(), let url = $0.bundleURL else {
+                return false
+            }
+            if url.resolvingSymlinksInPath().path == target.path { return true }
+            return (try? url.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly) == true &&
+                identity?.matches(processID: $0.processIdentifier) == true
         }
     }
 
     @MainActor
     private static func launch(_ url: URL, backup: URL) async throws {
+        let identity = try AppCodeIdentity(at: url)
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         configuration.allowsRunningApplicationSubstitution = false
         configuration.promptsUserIfNeeded = true
+        configuration.arguments = [installationPathArgument, url.path]
         let app = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-        guard app.bundleURL?.resolvingSymlinksInPath().path == url.path else {
-            throw UpdateInstallError.launchFailed
-        }
 
         let deadline = ContinuousClock.now + .seconds(10)
         while !app.isTerminated && !app.isFinishedLaunching && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(100))
         }
         guard !app.isTerminated else { throw UpdateInstallError.launchFailed }
-        guard app.isFinishedLaunching else { throw UpdateInstallError.launchPending(backup) }
+        // Gatekeeper can launch the new process from a different bundle URL.
+        // A live process with an unconfirmed identity must not trigger a second launch.
+        guard app.isFinishedLaunching, identity.matches(processID: app.processIdentifier) else {
+            if app.isTerminated { throw UpdateInstallError.launchFailed }
+            throw UpdateInstallError.launchUnconfirmed(backup)
+        }
     }
 
     @MainActor
@@ -246,5 +279,36 @@ struct AppUpdateInstaller {
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw UpdateInstallError.toolFailed(operation) }
+    }
+}
+
+struct AppCodeIdentity {
+    private let requirement: SecRequirement
+
+    init(at url: URL) throws {
+        var code: SecStaticCode?
+        var information: CFDictionary?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
+              let code,
+              SecCodeCopySigningInformation(code, [], &information) == errSecSuccess,
+              let hash = (information as? [String: Any])?[kSecCodeInfoUnique as String] as? Data
+        else { throw UpdateInstallError.invalidBundle }
+
+        let hex = hash.map { String(format: "%02x", $0) }.joined()
+        var requirement: SecRequirement?
+        let expression = "cdhash H\"\(hex)\""
+        guard SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess,
+              let requirement
+        else { throw UpdateInstallError.invalidBundle }
+        self.requirement = requirement
+    }
+
+    func matches(processID: pid_t) -> Bool {
+        var code: SecCode?
+        let attributes = [kSecGuestAttributePid as String: processID] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else {
+            return false
+        }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 }
