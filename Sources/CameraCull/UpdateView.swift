@@ -9,7 +9,8 @@ final class AppUpdateController: ObservableObject {
         case current
         case available(AvailableUpdate, downloadError: String? = nil)
         case downloading(AvailableUpdate)
-        case ready(AvailableUpdate, URL, openError: String? = nil)
+        case ready(AvailableUpdate, URL, actionError: String? = nil)
+        case installing(AvailableUpdate)
         case checkFailed(String)
     }
 
@@ -31,7 +32,7 @@ final class AppUpdateController: ObservableObject {
 
     func check() async {
         switch state {
-        case .checking, .downloading: return
+        case .checking, .downloading, .installing: return
         default: break
         }
         guard let installedVersion else {
@@ -66,7 +67,35 @@ final class AppUpdateController: ObservableObject {
         if !FileManager.default.fileExists(atPath: file.path) {
             state = .available(update, downloadError: "安装包已被清理，请重新下载。")
         } else if !NSWorkspace.shared.open(file) {
-            state = .ready(update, file, openError: "macOS 无法打开安装包。")
+            state = .ready(update, file, actionError: "macOS 无法打开安装包。")
+        }
+    }
+
+    func installAndRestart(store: SessionStore) async {
+        guard case .ready(let update, let file, _) = state else { return }
+        guard store.canRestartForUpdate else {
+            state = .ready(update, file, actionError: UpdateInstallError.projectBusy.localizedDescription)
+            return
+        }
+        state = .installing(update)
+        do {
+            let prepared = try await Task.detached(priority: .userInitiated) {
+                try AppUpdateInstaller.prepare(diskImage: file, update: update)
+            }.value
+            do {
+                try store.saveForUpdateRestart()
+                try AppUpdateInstaller.startHelper(prepared)
+            } catch {
+                prepared.discard()
+                throw error
+            }
+            NSApplication.shared.terminate(nil)
+        } catch {
+            if !FileManager.default.fileExists(atPath: file.path) {
+                state = .available(update, downloadError: "安装包已被清理，请重新下载。")
+            } else {
+                state = .ready(update, file, actionError: error.localizedDescription)
+            }
         }
     }
 }
@@ -75,6 +104,7 @@ struct AppUpdateView: View {
     static let windowID = "software-update"
 
     @ObservedObject var updater: AppUpdateController
+    @ObservedObject var store: SessionStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -112,17 +142,25 @@ struct AppUpdateView: View {
                 progress("正在下载并校验安装包…")
             case .ready(let update, _, let error):
                 Text("\(update.version) 已下载").font(.headline)
-                Text("安装包已通过 SHA‑256 校验。打开安装包后，退出影择，再将新版拖到「应用程序」并选择替换。")
+                Text("安装包已通过 SHA‑256 校验。安装时会先保存项目，再退出影择并启动新版。")
                     .foregroundStyle(.secondary)
                 if let error {
                     Text(error).foregroundStyle(.secondary)
                 }
-                HStack {
-                    releaseLink(update.releaseURL)
-                    Spacer()
-                    Button("打开安装包") { updater.openInstaller() }
-                        .appButton(.primary)
+                if !store.canRestartForUpdate {
+                    Text(UpdateInstallError.projectBusy.localizedDescription).foregroundStyle(.secondary)
                 }
+                HStack {
+                    Button("打开安装包") { updater.openInstaller() }
+                        .appButton(.secondary)
+                    Spacer()
+                    Button("安装并重启") { Task { await updater.installAndRestart(store: store) } }
+                        .appButton(.primary)
+                        .disabled(!store.canRestartForUpdate)
+                }
+            case .installing(let update):
+                Text("正在安装 \(update.version)").font(.headline)
+                progress("正在检查安装包和保存项目…")
             case .checkFailed(let error):
                 Text("检查更新失败").font(.headline)
                 Text(error).foregroundStyle(.secondary).textSelection(.enabled)

@@ -1,6 +1,18 @@
+import Darwin
 import SwiftUI
 
 @main
+enum CameraCullEntryPoint {
+    @MainActor
+    static func main() async {
+        let arguments = CommandLine.arguments
+        if arguments.dropFirst().first == AppUpdateInstaller.helperArgument {
+            exit(await AppUpdateInstaller.runHelper(arguments: arguments))
+        }
+        CameraCullApp.main()
+    }
+}
+
 struct CameraCullApp: App {
     @StateObject private var store = SessionStore()
     @StateObject private var shortcutSettings = ShortcutSettings()
@@ -16,7 +28,7 @@ struct CameraCullApp: App {
         .commands { CameraCullCommands(store: store, shortcutSettings: shortcutSettings, updater: updater) }
 
         Window("软件更新", id: AppUpdateView.windowID) {
-            AppUpdateView(updater: updater)
+            AppUpdateView(updater: updater, store: store)
         }
         .defaultPosition(.center)
         .windowResizability(.contentSize)

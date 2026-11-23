@@ -128,7 +128,12 @@ struct AppUpdateService: Sendable {
         guard actual == package.sha256 else { throw AppUpdateError.verificationFailed }
     }
 
-    private static func versionComponents(_ version: String) -> [Int]? {
+    static func isNewer(_ version: String, than current: String) -> Bool {
+        guard let latest = versionComponents(version), let installed = versionComponents(current) else { return false }
+        return installed.lexicographicallyPrecedes(latest)
+    }
+
+    static func versionComponents(_ version: String) -> [Int]? {
         let digits = version.first == "v" || version.first == "V" ? version.dropFirst() : version[...]
         let fields = digits.split(separator: ".", omittingEmptySubsequences: false)
         guard (1...3).contains(fields.count),

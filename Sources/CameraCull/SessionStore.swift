@@ -951,13 +951,31 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    private func saveNow() {
+    var canRestartForUpdate: Bool {
+#if AI_CULL
+        !isIndexing && !isArchiving && !isAutoCulling
+#else
+        !isIndexing && !isArchiving
+#endif
+    }
+
+    func saveForUpdateRestart() throws {
+        guard canRestartForUpdate else { throw UpdateInstallError.projectBusy }
+        try persistCurrentSession()
+        saveTask?.cancel()
+    }
+
+    private func persistCurrentSession() throws {
         guard let id = currentProjectID, session.sourceURL != nil else { return }
         session.updatedAt = .now
+        try writeSession(session, id: id)
+        upsertProjectSummary(id: id, session: session)
+        try saveProjectIndex()
+    }
+
+    private func saveNow() {
         do {
-            try writeSession(session, id: id)
-            upsertProjectSummary(id: id, session: session)
-            try saveProjectIndex()
+            try persistCurrentSession()
         } catch {
             presentedError = "会话保存失败：\(error.localizedDescription)"
         }
