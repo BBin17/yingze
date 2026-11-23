@@ -39,7 +39,10 @@ final class SessionStore: ObservableObject {
     @Published private(set) var currentProjectID: UUID?
     @Published var showsProjectHome = true
     @Published var browserMode: BrowserMode = .grid {
-        didSet { preheatFullSizeImagesIfNeeded() }
+        didSet {
+            preheatPreviewIfNeeded()
+            if browserMode == .single, let id = session.selectedGroupID { loadMetadataIfNeeded(for: id) }
+        }
     }
     @Published var gridThumbnailSize: Double = {
         let saved = UserDefaults.standard.double(forKey: "Yingze.GridThumbnailSize")
@@ -117,7 +120,7 @@ final class SessionStore: ObservableObject {
     }() {
         didSet {
             UserDefaults.standard.set(previewMode.rawValue, forKey: "Yingze.PreviewMode")
-            preheatFullSizeImagesIfNeeded()
+            preheatPreviewIfNeeded()
         }
     }
     @Published private(set) var isIndexing = false
@@ -132,6 +135,7 @@ final class SessionStore: ObservableObject {
     private var undoStack: [[(id: String, previous: PhotoGroup)]] = []
     private var saveTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
+    private var previewPreheatTask: Task<Void, Never>?
 #if AI_CULL
     private var autoCullTask: Task<Void, Never>?
 #endif
@@ -253,7 +257,12 @@ final class SessionStore: ObservableObject {
                 }
             }
             do {
-                let result = try await PhotoIndexer().scan(directory: directory) { batch in
+#if AI_CULL
+                let includeCaptureMetadata = true
+#else
+                let includeCaptureMetadata = false
+#endif
+                let result = try await PhotoIndexer().scan(directory: directory, includeCaptureMetadata: includeCaptureMetadata) { batch in
                     await MainActor.run {
                         guard !Task.isCancelled, self.currentProjectID == projectID else { return }
                         if refreshing {
@@ -266,11 +275,14 @@ final class SessionStore: ObservableObject {
                     }
                 }
                 guard !Task.isCancelled, currentProjectID == projectID else { return }
-                session.groups = ProjectRefreshMerger.merge(scanned: result, previous: session.groups)
+                if refreshing {
+                    session.groups = ProjectRefreshMerger.merge(scanned: result, previous: session.groups)
+                }
                 let validIDs = Set(session.groups.map(\.id))
                 multiSelectedIDs.formIntersection(validIDs)
                 selectionAnchorID = selectionAnchorID.flatMap { validIDs.contains($0) ? $0 : nil }
                 ensureVisibleSelection()
+                if browserMode == .single, let id = session.selectedGroupID { loadMetadataIfNeeded(for: id) }
                 progressMessage = refreshing ? "刷新完成，共 \(result.count) 组照片" : "共 \(result.count) 组照片"
                 scheduleSave()
             } catch is CancellationError {
@@ -293,7 +305,7 @@ final class SessionStore: ObservableObject {
 
     func focus(_ id: String) {
         session.selectedGroupID = id
-        preheatFullSizeImagesIfNeeded()
+        preheatPreviewIfNeeded()
         loadMetadataIfNeeded(for: id)
         scheduleSave()
     }
@@ -316,7 +328,7 @@ final class SessionStore: ObservableObject {
             multiSelectedIDs = [id]
             selectionAnchorID = id
         }
-        preheatFullSizeImagesIfNeeded()
+        preheatPreviewIfNeeded()
         loadMetadataIfNeeded(for: id)
         scheduleSave()
     }
@@ -424,7 +436,7 @@ final class SessionStore: ObservableObject {
         surveyLimit = visible.count > 4 ? 9 : 4
         browserMode = visible.count == 2 ? .compare : (visible.count > 2 ? .survey : .single)
         showingAutoCullReview = false
-        preheatFullSizeImagesIfNeeded()
+        preheatPreviewIfNeeded()
     }
 
     func clearAutoCullAnalysis() {
@@ -479,6 +491,10 @@ final class SessionStore: ObservableObject {
     }
 
     func previewURL(for group: PhotoGroup) -> URL? { group.previewURL(for: previewMode) }
+
+    func previewPixelSize(for group: PhotoGroup, fittingWindow: Bool) -> Int {
+        previewMode.previewPixelSize(for: previewURL(for: group), fittingWindow: fittingWindow)
+    }
 
     func toggleRatingFilter(_ rating: Int) {
         var next = ratingFilters
@@ -641,7 +657,7 @@ final class SessionStore: ObservableObject {
         let current = visible.firstIndex { $0.id == session.selectedGroupID } ?? 0
         let next = min(visible.count - 1, max(0, current + offset))
         session.selectedGroupID = visible[next].id
-        preheatFullSizeImagesIfNeeded()
+        preheatPreviewIfNeeded()
         loadMetadataIfNeeded(for: visible[next].id)
         scheduleSave()
     }
@@ -861,19 +877,20 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    private func preheatFullSizeImagesIfNeeded() {
+    private func preheatPreviewIfNeeded() {
+        previewPreheatTask?.cancel()
+        previewPreheatTask = nil
+        guard browserMode == .single, !showsProjectHome else { return }
         let visible = displayedGroups
-        guard browserMode != .grid,
-              let current = visible.firstIndex(where: { $0.id == session.selectedGroupID })
+        guard let current = visible.firstIndex(where: { $0.id == session.selectedGroupID }),
+              visible.indices.contains(current + 1),
+              let url = previewURL(for: visible[current + 1])
         else { return }
-        let neighborIndices = previewMode == .original ? [current] : [current, current + 1, current - 1]
-        let indices = neighborIndices.filter { visible.indices.contains($0) }
-        let urls = indices.compactMap { previewURL(for: visible[$0]) }
-        Task(priority: .utility) {
-            for url in urls {
-                if Task.isCancelled { return }
-                _ = await ImageCache.shared.image(for: url, maxPixelSize: previewMode.previewPixelSize)
-            }
+        let pixelSize = previewMode.previewPixelSize(for: url, fittingWindow: true)
+        guard (1...2_048).contains(pixelSize) else { return }
+        previewPreheatTask = Task(priority: .utility) {
+            guard (try? await Task.sleep(for: .milliseconds(45))) != nil else { return }
+            _ = await ImageCache.shared.image(for: url, maxPixelSize: pixelSize, priority: .utility)
         }
     }
 
@@ -911,7 +928,8 @@ final class SessionStore: ObservableObject {
         if let selectedID = session.selectedGroupID, visible.contains(where: { $0.id == selectedID }) { return }
         session.selectedGroupID = visible[min(max(0, preferredIndex), visible.count - 1)].id
         multiSelectedIDs = multiSelectedIDs.intersection(Set(session.groups.map(\.id)))
-        preheatFullSizeImagesIfNeeded()
+        preheatPreviewIfNeeded()
+        if browserMode == .single, let id = session.selectedGroupID { loadMetadataIfNeeded(for: id) }
     }
 
     private func showUndoNotice(_ message: String) {

@@ -159,6 +159,26 @@ struct PhotoIndexerTests {
         #expect(group.captureDate != nil)
     }
 
+    @Test("延后读取 EXIF 时仍立即索引 XMP 标记")
+    func deferringExifPreservesXMPAndAllowsLaterRead() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("PHOTO.JPG")
+        try writeJPEGWithMetadata(to: url)
+        let xmp = try XMPWriter().data(existingURL: nil, rating: 4, label: .green)
+        try xmp.write(to: directory.appendingPathComponent("PHOTO.xmp"))
+
+        let groups = try await PhotoIndexer().scan(directory: directory, includeCaptureMetadata: false) { _ in }
+        let group = try #require(groups.first)
+        #expect(!group.hasCaptureMetadata)
+        #expect(group.rating == 4)
+        #expect(group.colorLabel == .green)
+        let enriched = PhotoMetadataReader.enrich(group)
+        #expect(enriched.iso == 400)
+        #expect(enriched.rating == 4)
+        #expect(enriched.colorLabel == .green)
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("CameraCullTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

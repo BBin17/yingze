@@ -91,30 +91,36 @@ final class ImageCache: ObservableObject {
 
     private init() {
         cache.countLimit = 180
-        cache.totalCostLimit = 768 * 1024 * 1024
+        cache.totalCostLimit = 256 * 1024 * 1024
         Task.detached(priority: .background) { ThumbnailDiskCache.pruneIfNeeded() }
     }
 
-    func image(for url: URL, maxPixelSize: Int) async -> NSImage? {
+    func image(for url: URL, maxPixelSize: Int, priority: TaskPriority? = nil) async -> NSImage? {
+        guard !Task.isCancelled else { return nil }
         let key = "\(url.path)#\(maxPixelSize)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
-        if let task = tasks[key as String], let decoded = await task.value {
-            return makeImage(decoded.value, key: key)
+        if let task = tasks[key as String] {
+            guard let decoded = await task.value, !Task.isCancelled else { return nil }
+            return cache.object(forKey: key) ?? makeImage(decoded.value, key: key)
         }
 
-        let task = Task.detached(priority: maxPixelSize > 1_000 ? .userInitiated : .utility) {
-            Self.decode(url: url, maxPixelSize: maxPixelSize)
+        let taskPriority = priority ?? (maxPixelSize == 0 || maxPixelSize > 1_024 ? .userInitiated : .utility)
+        let task = Task.detached(priority: taskPriority) {
+            autoreleasepool { Self.decode(url: url, maxPixelSize: maxPixelSize) }
         }
         tasks[key as String] = task
         let decoded = await task.value
         tasks[key as String] = nil
-        guard let decoded else { return nil }
+        guard let decoded, !Task.isCancelled else { return nil }
         return makeImage(decoded.value, key: key)
     }
 
     private func makeImage(_ cgImage: CGImage, key: NSString) -> NSImage {
         let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        cache.setObject(image, forKey: key, cost: max(1, cgImage.width * cgImage.height * 4))
+        let cost = cgImage.bytesPerRow * cgImage.height
+        if cost <= cache.totalCostLimit / 4 {
+            cache.setObject(image, forKey: key, cost: max(1, cost))
+        }
         return image
     }
 
@@ -133,7 +139,7 @@ final class ImageCache: ObservableObject {
             guard let cgImage = CGImageSourceCreateImageAtIndex(
                 source,
                 0,
-                [kCGImageSourceShouldCacheImmediately: false] as CFDictionary
+                [kCGImageSourceShouldCache: true, kCGImageSourceShouldCacheImmediately: true] as CFDictionary
             ) else { return nil }
             return SendableCGImage(value: applyingOrientation(to: cgImage, source: source))
         }
@@ -143,7 +149,7 @@ final class ImageCache: ObservableObject {
             isRenderedImage ? kCGImageSourceCreateThumbnailFromImageAlways : kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-            kCGImageSourceShouldCacheImmediately: false
+            kCGImageSourceShouldCacheImmediately: true
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         if let diskURL { ThumbnailDiskCache.store(cgImage, at: diskURL) }

@@ -120,6 +120,39 @@ struct PhotoCollectionTests {
         #expect(!PreviewMode.standard.prefersRaw)
     }
 
+    @Test("标准模式的 RAW 先适合窗口，放大后仍读取原始像素")
+    func standardRawPreviewKeepsFullResolutionForZoom() {
+        let raw = URL(fileURLWithPath: "/tmp/PHOTO.ARW")
+        let jpeg = URL(fileURLWithPath: "/tmp/PHOTO.JPG")
+        #expect(PreviewMode.standard.previewPixelSize(for: raw, fittingWindow: true) == 2_048)
+        #expect(PreviewMode.standard.previewPixelSize(for: raw, fittingWindow: false) == 0)
+        #expect(PreviewMode.standard.previewPixelSize(for: jpeg, fittingWindow: true) == 0)
+        #expect(PreviewMode.original.previewPixelSize(for: raw, fittingWindow: true) == 0)
+        #expect(PreviewMode.highQuality.previewPixelSize(for: raw, fittingWindow: true) == 6_144)
+    }
+
+    @Test("来源文件恢复后，同一路径的失败预览可以重新加载")
+    @MainActor
+    func retriesPreviewAfterSourceReturns() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("restored.jpg")
+        #expect(await ImageCache.shared.image(for: url, maxPixelSize: 1_024) == nil)
+
+        let context = try #require(CGContext(
+            data: nil, width: 24, height: 16, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ))
+        let image = try #require(context.makeImage())
+        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        try #require(CGImageDestinationFinalize(destination))
+
+        let retried = try #require(await ImageCache.shared.image(for: url, maxPixelSize: 1_024))
+        #expect(retried.size == CGSize(width: 24, height: 16))
+    }
+
     @Test("原图解码应用相机 EXIF 方向")
     @MainActor
     func originalPreviewAppliesEXIFOrientation() async throws {

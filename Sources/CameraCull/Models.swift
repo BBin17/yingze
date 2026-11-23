@@ -66,7 +66,7 @@ enum PreviewMode: String, CaseIterable, Identifiable, Sendable {
     var detail: String {
         switch self {
         case .fast: "优先 JPG/HEIC · 预览 2048px"
-        case .standard: "优先 JPG/HEIC · 完整原始像素"
+        case .standard: "优先 JPG/HEIC · RAW 适合窗口时用 2048px 预览"
         case .highQuality: "优先相机 RAW · 预览 6144px"
         case .original: "优先相机 RAW · 完整原始像素"
         }
@@ -90,6 +90,14 @@ enum PreviewMode: String, CaseIterable, Identifiable, Sendable {
         case .highQuality: 6_144
         case .original: 0
         }
+    }
+
+    func previewPixelSize(for url: URL?, fittingWindow: Bool) -> Int {
+        if self == .standard, fittingWindow, let url,
+           CameraRawFormat.supportedExtensions.contains(url.pathExtension.lowercased()) {
+            return 2_048
+        }
+        return previewPixelSize
     }
 }
 

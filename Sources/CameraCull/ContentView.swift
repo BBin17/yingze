@@ -789,7 +789,7 @@ private struct SinglePhotoView: View {
                             let actualScale = focusScale(for: group, viewport: geometry.size)
                             ZoomablePhoto(
                                 url: store.previewURL(for: group),
-                                maxPixelSize: isActualPixels(actualScale) ? 0 : store.previewMode.previewPixelSize,
+                                maxPixelSize: isActualPixels(actualScale) ? 0 : store.previewPixelSize(for: group, fittingWindow: scale <= 1.001),
                                 scale: $scale,
                                 offset: $offset,
                                 onDoubleClick: { toggleActualPixels(actualScale) }
@@ -967,7 +967,7 @@ private struct PreviewInspector: View {
                         metadataLine("相机", value: group.cameraText)
                         metadataLine("镜头", value: group.lensModel)
                     } else {
-                        Label("没有可读取的 EXIF 拍摄数据", systemImage: "info.circle")
+                        Label("暂无可显示的 EXIF 拍摄数据", systemImage: "info.circle")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -1127,12 +1127,13 @@ private struct ComparePhotosView: View {
     }
 
     private func comparisonTile(_ group: PhotoGroup) -> some View {
-        ZStack {
+        let scale = scaleBinding(for: group.id)
+        return ZStack {
             Color.black
             ZoomablePhoto(
                 url: store.previewURL(for: group),
-                maxPixelSize: store.previewMode.previewPixelSize,
-                scale: scaleBinding(for: group.id),
+                maxPixelSize: store.previewPixelSize(for: group, fittingWindow: scale.wrappedValue <= 1.001),
+                scale: scale,
                 offset: offsetBinding(for: group.id)
             )
             VStack {
@@ -1220,10 +1221,8 @@ private struct ZoomablePhoto: View {
     @State private var dragStart = CGSize.zero
 
     var body: some View {
-        PhotoImage(url: url, maxPixelSize: maxPixelSize)
+        PhotoImage(url: url, maxPixelSize: maxPixelSize, scale: scale * gestureScale, offset: offset)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .scaleEffect(scale * gestureScale)
-            .offset(x: offset.width, y: offset.height)
             .gesture(MagnifyGesture()
                 .onChanged { gestureScale = $0.magnification }
                 .onEnded { value in
@@ -1300,23 +1299,71 @@ private struct ScrollWheelZoomMonitor: NSViewRepresentable {
 }
 
 private struct PhotoImage: View {
+    private struct Request: Equatable {
+        let url: URL?
+        let maxPixelSize: Int
+        let attempt: Int
+    }
+
+    private struct Completion {
+        let request: Request
+        let image: NSImage?
+    }
+
     let url: URL?
     let maxPixelSize: Int
     var displayMode: ContentMode = .fit
-    @State private var image: NSImage?
+    var scale = 1.0
+    var offset = CGSize.zero
+    @State private var completion: Completion?
+    @State private var attempt = 0
 
     var body: some View {
-        Group {
-            if let image {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: displayMode)
+        let request = Request(url: url, maxPixelSize: maxPixelSize, attempt: attempt)
+        return Group {
+            if url == nil {
+                placeholder("没有预览文件", canRetry: false)
+            } else if let completion, completion.request == request {
+                if let image = completion.image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: displayMode)
+                        .scaleEffect(scale)
+                        .offset(x: offset.width, y: offset.height)
+                } else {
+                    placeholder("预览失败", canRetry: true)
+                }
             } else {
-                ZStack { Color.black; ProgressView().tint(.white) }
+                ZStack {
+                    Color.black
+                    ProgressView().controlSize(.small).tint(.white)
+                        .accessibilityLabel("正在加载预览")
+                }
             }
         }
-        .task(id: "\(url?.path ?? "")#\(maxPixelSize)") {
-            guard let url else { return }
-            image = nil
-            image = await ImageCache.shared.image(for: url, maxPixelSize: maxPixelSize)
+        .task(id: request) {
+            guard !Task.isCancelled else { return }
+            completion = nil
+            guard let url = request.url else { return }
+            let image = await ImageCache.shared.image(for: url, maxPixelSize: request.maxPixelSize)
+            guard !Task.isCancelled else { return }
+            completion = Completion(request: request, image: image)
+        }
+    }
+
+    private func placeholder(_ message: String, canRetry: Bool) -> some View {
+        ZStack {
+            Color.black
+            VStack(spacing: 5) {
+                Text(message).font(.caption).foregroundStyle(.white)
+                if canRetry {
+                    Button("重试") { attempt += 1 }
+                        .appButton(.secondary, controlSize: .small)
+                        .accessibilityLabel("重试预览")
+                        .help("请确认文件可读取，或重新连接来源磁盘后重试")
+                }
+            }
+            .padding(4)
         }
     }
 }

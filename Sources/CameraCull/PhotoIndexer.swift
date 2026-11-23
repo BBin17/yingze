@@ -54,6 +54,7 @@ struct PhotoIndexer: Sendable {
     func scan(
         directory: URL,
         batchSize: Int = 100,
+        includeCaptureMetadata: Bool = true,
         onBatch: @escaping @Sendable ([PhotoGroup]) async -> Void
     ) async throws -> [PhotoGroup] {
         try Task.checkCancellation()
@@ -84,7 +85,7 @@ struct PhotoIndexer: Sendable {
             guard var bucket = buckets[key] else { continue }
             bucket.sort()
             guard !bucket.jpegs.isEmpty || !bucket.heics.isEmpty || !bucket.raws.isEmpty else { continue }
-            var group = PhotoMetadataReader.enrich(PhotoGroup(
+            var group = PhotoGroup(
                 id: key,
                 baseName: bucket.name,
                 jpegURL: bucket.jpegs.first,
@@ -95,7 +96,10 @@ struct PhotoIndexer: Sendable {
                 pixelWidth: nil,
                 pixelHeight: nil,
                 pairingConflicts: bucket.conflicts
-            ))
+            )
+            if includeCaptureMetadata {
+                group = PhotoMetadataReader.enrich(group)
+            }
             if let metadata = XMPReader().metadata(at: bucket.xmps.first) {
                 if let rating = metadata.rating { group.rating = rating }
                 if let colorLabel = metadata.colorLabel { group.colorLabel = colorLabel }
