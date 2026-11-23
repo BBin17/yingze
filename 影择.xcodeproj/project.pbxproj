@@ -23,6 +23,9 @@
 		A20000000000000000000004 /* PhotoIndexerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000004 /* PhotoIndexerTests.swift */; };
 		A20000000000000000000005 /* XMPWriterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000005 /* XMPWriterTests.swift */; };
 		A30000000000000000000001 /* Yingze.icns in Resources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* Yingze.icns */; };
+		A10000000000000000000011 /* UpdateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000011 /* UpdateService.swift */; };
+		A10000000000000000000012 /* UpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000012 /* UpdateView.swift */; };
+		A20000000000000000000006 /* UpdateServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000006 /* UpdateServiceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -56,6 +59,9 @@
 		E10000000000000000000002 /* Yingze.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = Yingze.icns; sourceTree = "<group>"; };
 		F10000000000000000000001 /* 影择.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "影择.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F10000000000000000000002 /* 影择Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "影择Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000011 /* UpdateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateService.swift; sourceTree = "<group>"; };
+		C10000000000000000000012 /* UpdateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateView.swift; sourceTree = "<group>"; };
+		D10000000000000000000006 /* UpdateServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateServiceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,8 +81,8 @@
 			sourceTree = "<group>";
 		};
 		A00000000000000000000003 /* Products */ = {isa = PBXGroup; children = (F10000000000000000000001 /* 影择.app */, F10000000000000000000002 /* 影择Tests.xctest */); name = Products; sourceTree = "<group>"; };
-		A00000000000000000000004 /* CameraCull */ = {isa = PBXGroup; children = (C10000000000000000000001, C10000000000000000000002, C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, C10000000000000000000006, C10000000000000000000007, C10000000000000000000008, C10000000000000000000009, C10000000000000000000010); name = CameraCull; path = Sources/CameraCull; sourceTree = SOURCE_ROOT; };
-		A00000000000000000000005 /* CameraCullTests */ = {isa = PBXGroup; children = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005); name = CameraCullTests; path = Tests/CameraCullTests; sourceTree = SOURCE_ROOT; };
+		A00000000000000000000004 /* CameraCull */ = {isa = PBXGroup; children = (C10000000000000000000001, C10000000000000000000002, C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, C10000000000000000000006, C10000000000000000000007, C10000000000000000000008, C10000000000000000000009, C10000000000000000000010, C10000000000000000000011, C10000000000000000000012); name = CameraCull; path = Sources/CameraCull; sourceTree = SOURCE_ROOT; };
+		A00000000000000000000005 /* CameraCullTests */ = {isa = PBXGroup; children = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006); name = CameraCullTests; path = Tests/CameraCullTests; sourceTree = SOURCE_ROOT; };
 		A00000000000000000000006 /* Resources */ = {isa = PBXGroup; children = (E10000000000000000000001 /* Info.plist */, E10000000000000000000002 /* Yingze.icns */, E10000000000000000000008 /* AppIcon.icon */); name = Resources; path = Resources; sourceTree = SOURCE_ROOT; };
 /* End PBXGroup section */
 
@@ -136,8 +142,8 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		P10000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000008, A10000000000000000000009, A10000000000000000000010); runOnlyForDeploymentPostprocessing = 0; };
-		P20000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004, A20000000000000000000005); runOnlyForDeploymentPostprocessing = 0; };
+		P10000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000008, A10000000000000000000009, A10000000000000000000010, A10000000000000000000011, A10000000000000000000012); runOnlyForDeploymentPostprocessing = 0; };
+		P20000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004, A20000000000000000000005, A20000000000000000000006); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */

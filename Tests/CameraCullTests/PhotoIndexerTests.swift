@@ -47,6 +47,29 @@ struct PhotoIndexerTests {
         #expect(elapsed < .seconds(15))
     }
 
+    @Test("区分空目录与扫描途中断开的来源目录")
+    func detectsSourceDisappearingDuringScan() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Source", isDirectory: true)
+        let unavailable = root.appendingPathComponent("Disconnected", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        let indexer = PhotoIndexer()
+        let empty = try await indexer.scan(directory: source) { _ in }
+        #expect(empty.isEmpty)
+        try Data().write(to: source.appendingPathComponent("A.JPG"))
+
+        await #expect(throws: PhotoIndexerError.self) {
+            try await indexer.scan(directory: source, batchSize: 1) { _ in
+                do {
+                    try FileManager.default.moveItem(at: source, to: unavailable)
+                } catch {
+                    Issue.record("无法模拟断开来源目录：\(error)")
+                }
+            }
+        }
+    }
+
     @Test("不同子目录的同名照片不会错误配对")
     func keepsDuplicateNamesInSeparateDirectories() async throws {
         let directory = try temporaryDirectory()
@@ -88,7 +111,7 @@ struct PhotoIndexerTests {
         try Data("jpg".utf8).write(to: directory.appendingPathComponent("DSC0003.JPG"))
         try Data("raw".utf8).write(to: directory.appendingPathComponent("DSC0003.ARW"))
         try """
-        <rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3" xmp:Label="Purple"/>
+        <rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3" xmp:Label="Purple"/>
         """.write(to: directory.appendingPathComponent("dsc0003.xmp"), atomically: true, encoding: .utf8)
 
         let group = try #require(try await PhotoIndexer().scan(directory: directory) { _ in }.first)

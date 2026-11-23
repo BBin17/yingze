@@ -4,14 +4,23 @@ import SwiftUI
 struct CameraCullApp: App {
     @StateObject private var store = SessionStore()
     @StateObject private var shortcutSettings = ShortcutSettings()
+    @StateObject private var updater = AppUpdateController()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(shortcutSettings)
+                .environmentObject(updater)
         }
-        .commands { CameraCullCommands(store: store, shortcutSettings: shortcutSettings) }
+        .commands { CameraCullCommands(store: store, shortcutSettings: shortcutSettings, updater: updater) }
+
+        Window("软件更新", id: AppUpdateView.windowID) {
+            AppUpdateView(updater: updater)
+        }
+        .defaultPosition(.center)
+        .windowResizability(.contentSize)
+        .commandsRemoved()
 
         Settings {
             ShortcutSettingsView().environmentObject(shortcutSettings)
@@ -20,10 +29,18 @@ struct CameraCullApp: App {
 }
 
 struct CameraCullCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var store: SessionStore
     @ObservedObject var shortcutSettings: ShortcutSettings
+    let updater: AppUpdateController
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("检查更新…") {
+                openWindow(id: AppUpdateView.windowID)
+                Task { await updater.check() }
+            }
+        }
         CommandMenu("选片") {
             Button("标记为精选（\(shortcutSettings.binding(for: .pick).displayText)）") { store.setPickState(.keep) }
             Button("移入废片（\(shortcutSettings.binding(for: .reject).displayText)）") { store.setPickState(.reject) }

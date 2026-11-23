@@ -6,7 +6,8 @@ enum PhotoIndexerError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unreadableDirectory(let url): "无法读取文件夹：\(url.path)"
+        case .unreadableDirectory(let url):
+            "无法读取文件夹：\(url.path)\n请确认来源磁盘或 NAS 已连接，且文件夹可访问。"
         }
     }
 }
@@ -55,14 +56,23 @@ struct PhotoIndexer: Sendable {
         batchSize: Int = 100,
         onBatch: @escaping @Sendable ([PhotoGroup]) async -> Void
     ) async throws -> [PhotoGroup] {
-        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey]
+        try Task.checkCancellation()
+        try validateDirectory(directory)
+
+        let keys: Set<URLResourceKey> = [.isRegularFileKey]
+        var failedDirectory: URL?
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { url, _ in
+                failedDirectory = url
+                return false
+            }
         ) else { throw PhotoIndexerError.unreadableDirectory(directory) }
 
         let buckets = try collectBuckets(enumerator: enumerator, root: directory, keys: keys)
+        if let failedDirectory { throw PhotoIndexerError.unreadableDirectory(failedDirectory) }
 
         let sorted = buckets.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         var result: [PhotoGroup] = []
@@ -70,6 +80,7 @@ struct PhotoIndexer: Sendable {
         var batch: [PhotoGroup] = []
 
         for key in sorted {
+            try Task.checkCancellation()
             guard var bucket = buckets[key] else { continue }
             bucket.sort()
             guard !bucket.jpegs.isEmpty || !bucket.heics.isEmpty || !bucket.raws.isEmpty else { continue }
@@ -97,19 +108,30 @@ struct PhotoIndexer: Sendable {
             }
         }
         if !batch.isEmpty { await onBatch(batch) }
+        try Task.checkCancellation()
+        try validateDirectory(directory)
         return result
+    }
+
+    private func validateDirectory(_ url: URL) throws {
+        var isDirectory: ObjCBool = false
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              manager.isReadableFile(atPath: url.path)
+        else { throw PhotoIndexerError.unreadableDirectory(url) }
     }
 
     private func collectBuckets(
         enumerator: FileManager.DirectoryEnumerator,
         root: URL,
-        keys: [URLResourceKey]
+        keys: Set<URLResourceKey>
     ) throws -> [String: Bucket] {
         var buckets: [String: Bucket] = [:]
         while let url = enumerator.nextObject() as? URL {
-            if Task.isCancelled { throw CancellationError() }
-            let values = try? url.resourceValues(forKeys: Set(keys))
-            guard values?.isRegularFile == true else { continue }
+            try Task.checkCancellation()
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { continue }
             let ext = url.pathExtension.lowercased()
             guard Self.jpegExtensions.contains(ext) || Self.heicExtensions.contains(ext) || Self.rawExtensions.contains(ext) || Self.xmpExtensions.contains(ext) else { continue }
             let name = url.deletingPathExtension().lastPathComponent
@@ -128,7 +150,7 @@ struct PhotoIndexer: Sendable {
 }
 
 enum PhotoMetadataReader {
-    private struct Values {
+    struct Values: Sendable {
         var captureDate: Date?
         var pixelWidth: Int?
         var pixelHeight: Int?
@@ -142,6 +164,21 @@ enum PhotoMetadataReader {
 
         var needsRawFallback: Bool {
             exposureTime == nil || fNumber == nil || iso == nil || focalLength == nil
+        }
+
+        func applying(to group: PhotoGroup) -> PhotoGroup {
+            var enriched = group
+            enriched.captureDate = captureDate
+            enriched.pixelWidth = pixelWidth
+            enriched.pixelHeight = pixelHeight
+            enriched.exposureTime = exposureTime
+            enriched.fNumber = fNumber
+            enriched.iso = iso
+            enriched.focalLength = focalLength
+            enriched.lensModel = lensModel
+            enriched.cameraMake = cameraMake
+            enriched.cameraModel = cameraModel
+            return enriched
         }
 
         func fillingMissing(from fallback: Values?) -> Values {
@@ -162,26 +199,18 @@ enum PhotoMetadataReader {
     }
 
     static func enrich(_ group: PhotoGroup) -> PhotoGroup {
-        guard !group.hasCaptureMetadata else { return group }
+        metadata(for: group)?.applying(to: group) ?? group
+    }
+
+    static func metadata(for group: PhotoGroup) -> Values? {
+        guard !group.hasCaptureMetadata else { return nil }
         let renderedURL = group.renderedPreviewURL
         let primaryURL = renderedURL ?? group.rawURL
         var values = read(from: primaryURL)
         if values?.needsRawFallback == true, let rawURL = group.rawURL, rawURL != primaryURL {
             values = values?.fillingMissing(from: read(from: rawURL)) ?? read(from: rawURL)
         }
-        guard let values else { return group }
-        var enriched = group
-        enriched.captureDate = values.captureDate
-        enriched.pixelWidth = values.pixelWidth
-        enriched.pixelHeight = values.pixelHeight
-        enriched.exposureTime = values.exposureTime
-        enriched.fNumber = values.fNumber
-        enriched.iso = values.iso
-        enriched.focalLength = values.focalLength
-        enriched.lensModel = values.lensModel
-        enriched.cameraMake = values.cameraMake
-        enriched.cameraModel = values.cameraModel
-        return enriched
+        return values
     }
 
     private static func read(from url: URL?) -> Values? {

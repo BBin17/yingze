@@ -1,59 +1,112 @@
 import CryptoKit
 import Foundation
 
+struct ArchiveRequest: Codable, Sendable {
+    let source: URL
+    let destinationRoot: URL
+    let projectName: String
+    let groups: [PhotoGroup]
+    var preservesSubdirectories = false
+
+    var projectURL: URL { destinationRoot.appendingPathComponent(projectName, isDirectory: true) }
+    var stagingURL: URL { destinationRoot.appendingPathComponent(".\(projectName).影择导出中", isDirectory: true) }
+
+    static func isValidFolderName(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\0")
+    }
+}
+
+struct ArchiveFileFailure: Sendable {
+    let path: String
+    let reason: String
+}
+
 struct ArchiveOutcome: Sendable, Identifiable {
     var id: String { groupID }
     let groupID: String
-    let baseName: String
-    let succeeded: Bool
-    let error: String?
+    let failures: [ArchiveFileFailure]
+    var succeeded: Bool { failures.isEmpty }
+    var error: String? { failures.first.map { "\($0.path)：\($0.reason)" } }
 }
 
 struct ArchiveReport: Sendable, Identifiable {
-    var id: URL { projectURL }
-    let projectURL: URL
-    let logURL: URL
+    let id = UUID()
+    let request: ArchiveRequest
     let outcomes: [ArchiveOutcome]
+    let logURL: URL?
+    let isComplete: Bool
+    let issue: String?
 
-    var succeededCount: Int { outcomes.filter(\.succeeded).count }
-    var failedCount: Int { outcomes.filter { !$0.succeeded }.count }
+    var location: URL { isComplete ? request.projectURL : request.stagingURL }
+    var totalCount: Int { request.groups.lazy.filter { !$0.pickState.isRejected }.count }
+    var succeededCount: Int { outcomes.lazy.filter(\.succeeded).count }
+    var failedCount: Int { outcomes.count - succeededCount }
 }
 
 enum ArchiveError: LocalizedError {
+    case invalidFolderName
     case noAvailablePhotos
     case targetExists(URL)
     case conflicts([String])
     case pairingConflicts([String])
+    case invalidSourceGroup(String)
     case insufficientSpace(required: Int64, available: Int64)
     case destinationNotWritable(URL)
-    case verificationFailed(String)
+    case verificationFailed
     case resumeConflict(URL)
-    case incomplete(URL, Int)
+
+    var canRetry: Bool {
+        switch self {
+        case .insufficientSpace, .destinationNotWritable, .verificationFailed: true
+        default: false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
-        case .noAvailablePhotos: "没有可导出的照片；当前照片都在废片区。"
+        case .invalidFolderName: "请输入有效的导出文件夹名称。"
+        case .noAvailablePhotos: "当前范围没有可导出的照片。"
         case .targetExists(let url): "导出文件夹已存在：\(url.path)"
-        case .conflicts(let names): "目标存在同名文件：\(names.prefix(8).joined(separator: "、"))"
+        case .conflicts(let names): "目标存在同名文件或目录：\(names.prefix(8).joined(separator: "、"))"
         case .pairingConflicts(let names): "以下照片组存在重复配对，解决冲突后才能导出：\(names.prefix(8).joined(separator: "、"))"
+        case .invalidSourceGroup(let name): "照片组的文件不在同一个来源子目录：\(name)"
         case .insufficientSpace(let required, let available): "目标空间不足，需要 \(required) 字节，可用 \(available) 字节。"
-        case .destinationNotWritable(let url): "目标目录不可写：\(url.path)"
-        case .verificationFailed(let name): "文件校验失败：\(name)"
-        case .resumeConflict(let url): "发现不匹配的导出恢复数据：\(url.path)。请移走这个隐藏暂存目录后重试。"
-        case .incomplete(let url, let count): "有 \(count) 组照片导出失败。已保留可恢复数据：\(url.path)，修复问题后再次导出即可继续。"
+        case .destinationNotWritable(let url): "目标目录不可写：\(url.path)\n请检查目标磁盘或 NAS 是否已连接。"
+        case .verificationFailed: "文件 SHA-256 校验失败。"
+        case .resumeConflict(let url): "这个暂存目录属于不同的导出范围或目录布局：\(url.path)。请使用原来的导出设置，或为新导出使用其他名称。"
         }
     }
 }
 
 actor ArchiveService {
+    private struct PlannedGroup {
+        let photo: PhotoGroup
+        let subdirectories: [String]
+        let imageURLs: [URL]
+
+        var xmpName: String { "\(photo.baseName).xmp" }
+        var names: [String] { imageURLs.map(\.lastPathComponent) + [xmpName] }
+        var relativePaths: [String] { names.map { relativePath(for: $0) } }
+
+        func relativePath(for name: String) -> String {
+            (subdirectories + [name]).joined(separator: "/")
+        }
+    }
+
     private struct ExportManifest: Codable {
-        var version = 1
-        var sourcePath: String
-        var projectName: String
-        var plannedGroupIDs: [String]
+        var version = 2
+        let sourcePath: String
+        let projectName: String
+        let plannedGroupIDs: [String]
+        // Optional fields allow resuming a flat export started by version 1.
+        let preservesSubdirectories: Bool?
+        let plannedPaths: [[String]]?
         var completedGroupIDs: Set<String>
     }
 
+    private static let logName = "影择-导出日志.txt"
+    private static let manifestName = ".影择-导出状态.json"
+    private static let scratchName = ".影择-复制暂存"
     private let fileManager = FileManager.default
     private let xmpWriter = XMPWriter()
     private let interruptionAfterCompletedGroups: Int?
@@ -62,192 +115,282 @@ actor ArchiveService {
         self.interruptionAfterCompletedGroups = interruptionAfterCompletedGroups
     }
 
-    func execute(
-        source: URL,
-        destinationRoot: URL,
-        projectName: String,
-        groups: [PhotoGroup],
-        progress: @escaping @Sendable (String) -> Void
-    ) async throws -> ArchiveReport {
-        let available = groups.filter { !$0.pickState.isRejected }
+    func execute(_ request: ArchiveRequest, progress: @escaping @Sendable (String) -> Void) async throws -> ArchiveReport {
+        try Task.checkCancellation()
+        guard ArchiveRequest.isValidFolderName(request.projectName) else { throw ArchiveError.invalidFolderName }
+        let available = request.groups.filter { !$0.pickState.isRejected }
         guard !available.isEmpty else { throw ArchiveError.noAvailablePhotos }
-        let projectURL = destinationRoot.appendingPathComponent(projectName, isDirectory: true)
-        let stagingURL = destinationRoot.appendingPathComponent(".\(projectName).影择导出中", isDirectory: true)
-        try preflight(projectURL: projectURL, destinationRoot: destinationRoot, available: available)
-        var manifest = try prepareManifest(
-            at: stagingURL,
-            source: source,
-            projectName: projectName,
-            available: available
-        )
+        guard fileManager.isWritableFile(atPath: request.destinationRoot.path) else {
+            throw ArchiveError.destinationNotWritable(request.destinationRoot)
+        }
+        guard !fileManager.fileExists(atPath: request.projectURL.path) else { throw ArchiveError.targetExists(request.projectURL) }
+        let plan = try planExport(available, from: request.source, preservingSubdirectories: request.preservesSubdirectories)
+        let staging = request.stagingURL
+        var manifest = try prepareManifest(for: request, plan: plan)
+        let previouslyCompleted = plan.filter { manifest.completedGroupIDs.contains($0.photo.id) }
+        manifest.completedGroupIDs.removeAll()
+        for (index, group) in previouslyCompleted.enumerated() {
+            try Task.checkCancellation()
+            progress("正在校验暂存文件 \(index + 1)/\(previouslyCompleted.count)：\(group.relativePath(for: group.photo.baseName))")
+            if (try? completedGroupMatches(group, in: staging)) == true {
+                manifest.completedGroupIDs.insert(group.photo.id)
+            }
+        }
+        try checkCapacity(at: request.destinationRoot, remaining: plan.filter { !manifest.completedGroupIDs.contains($0.photo.id) })
+        try removeScratch(in: staging)
 
         var outcomes: [ArchiveOutcome] = []
-        var logLines = [
+        var issue: String?
+        var log = [
             "影择 导出日志",
-            "导出文件夹：\(projectName)",
-            "来源：\(source.path)",
-            "目标：\(projectURL.path)",
+            "来源：\(request.source.path)",
+            "目标：\(request.projectURL.path)",
             "开始：\(ISO8601DateFormatter().string(from: .now))",
             ""
         ]
-
-        for (index, group) in available.enumerated() {
-            if Task.isCancelled { throw CancellationError() }
-            progress("正在复制 \(index + 1)/\(available.count)：\(group.baseName)")
-            if manifest.completedGroupIDs.contains(group.id),
-               (try? completedGroupMatches(group, in: stagingURL)) == true {
-                outcomes.append(ArchiveOutcome(groupID: group.id, baseName: group.baseName, succeeded: true, error: nil))
-                logLines.append("[已验证，继续] \(group.baseName)")
-                continue
-            }
-            do {
-                try removeOutputs(for: group, from: stagingURL)
-                try copyGroup(group, to: stagingURL)
-                manifest.completedGroupIDs.insert(group.id)
-                try writeManifest(manifest, at: stagingURL)
-                outcomes.append(ArchiveOutcome(groupID: group.id, baseName: group.baseName, succeeded: true, error: nil))
-                logLines.append("[成功] \(group.baseName)")
-                if let interruptionAfterCompletedGroups,
-                   manifest.completedGroupIDs.count >= interruptionAfterCompletedGroups {
-                    throw CancellationError()
+        for (index, group) in plan.enumerated() {
+            try Task.checkCancellation()
+            progress("正在处理 \(index + 1)/\(plan.count)：\(group.relativePath(for: group.photo.baseName))")
+            var failures: [ArchiveFileFailure] = []
+            if manifest.completedGroupIDs.contains(group.photo.id) {
+                log.append("[已验证，继续] \(group.relativePath(for: group.photo.baseName))")
+            } else {
+                failures = try copyGroup(group, in: staging)
+                if failures.isEmpty {
+                    manifest.completedGroupIDs.insert(group.photo.id)
+                    do {
+                        try writeManifest(manifest, in: staging)
+                        log.append("[成功] \(group.relativePath(for: group.photo.baseName))")
+                    } catch {
+                        failures = [ArchiveFileFailure(path: Self.manifestName, reason: error.localizedDescription)]
+                        manifest.completedGroupIDs.remove(group.photo.id)
+                    }
+                    if let interruptionAfterCompletedGroups,
+                       manifest.completedGroupIDs.count >= interruptionAfterCompletedGroups {
+                        throw CancellationError()
+                    }
                 }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                manifest.completedGroupIDs.remove(group.id)
-                try? writeManifest(manifest, at: stagingURL)
-                outcomes.append(ArchiveOutcome(groupID: group.id, baseName: group.baseName, succeeded: false, error: error.localizedDescription))
-                logLines.append("[失败] \(group.baseName)：\(error.localizedDescription)")
+            }
+            outcomes.append(ArchiveOutcome(groupID: group.photo.id, failures: failures))
+            log += failures.map { "[失败] \($0.path)：\($0.reason)" }
+            if !failures.isEmpty, !fileManager.isWritableFile(atPath: staging.path) {
+                issue = ArchiveError.destinationNotWritable(staging).localizedDescription
+                break
             }
         }
 
-        logLines.append("")
-        logLines.append("来源文件夹保持不变；本次操作仅复制所选照片组。")
-
-        logLines.append("结束：\(ISO8601DateFormatter().string(from: .now))")
-        let stagedLogURL = stagingURL.appendingPathComponent("影择-导出日志.txt")
-        try logLines.joined(separator: "\n").write(to: stagedLogURL, atomically: true, encoding: .utf8)
-        let failedCount = outcomes.lazy.filter { !$0.succeeded }.count
-        guard failedCount == 0 else { throw ArchiveError.incomplete(stagingURL, failedCount) }
-
-        try fileManager.moveItem(at: stagingURL, to: projectURL)
-        try? fileManager.removeItem(at: manifestURL(in: projectURL))
-        return ArchiveReport(
-            projectURL: projectURL,
-            logURL: projectURL.appendingPathComponent(stagedLogURL.lastPathComponent),
-            outcomes: outcomes
-        )
+        try Task.checkCancellation()
+        log.append("结束：\(ISO8601DateFormatter().string(from: .now))")
+        if let issue { log.append(issue) }
+        let stagedLog = staging.appendingPathComponent(Self.logName)
+        var logURL: URL?
+        var isComplete = false
+        do {
+            try log.joined(separator: "\n").write(to: stagedLog, atomically: true, encoding: .utf8)
+            logURL = stagedLog
+            if issue == nil, outcomes.allSatisfy(\.succeeded) {
+                try removeScratch(in: staging)
+                try fileManager.moveItem(at: staging, to: request.projectURL)
+                try? fileManager.removeItem(at: manifestURL(in: request.projectURL))
+                logURL = request.projectURL.appendingPathComponent(Self.logName)
+                isComplete = true
+            }
+        } catch {
+            issue = issue ?? "无法写入导出日志或完成目标文件夹：\(error.localizedDescription)"
+        }
+        return ArchiveReport(request: request, outcomes: outcomes, logURL: logURL, isComplete: isComplete, issue: issue)
     }
 
-    private func preflight(projectURL: URL, destinationRoot: URL, available: [PhotoGroup]) throws {
-        guard fileManager.isWritableFile(atPath: destinationRoot.path) else { throw ArchiveError.destinationNotWritable(destinationRoot) }
-        if fileManager.fileExists(atPath: projectURL.path) { throw ArchiveError.targetExists(projectURL) }
-        let pairingConflicts = available.filter(\.hasPairingConflict).map(\.baseName)
+    private func planExport(_ groups: [PhotoGroup], from source: URL, preservingSubdirectories: Bool) throws -> [PlannedGroup] {
+        let sourcePath = source.standardizedFileURL.pathComponents
+        let pairingConflicts = groups.filter(\.hasPairingConflict).map(\.baseName)
         if !pairingConflicts.isEmpty { throw ArchiveError.pairingConflicts(pairingConflicts) }
-        let required = available.flatMap(\.allExistingURLs).reduce(Int64(0)) { sum, url in
-            sum + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        }
-        let availableCapacity = Int64((try? destinationRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage) ?? 0)
-        if availableCapacity > 0, required > availableCapacity {
-            throw ArchiveError.insufficientSpace(required: required, available: availableCapacity)
-        }
 
-        var names = Set<String>()
+        var files = Set([Self.logName, Self.manifestName, Self.scratchName].map { $0.lowercased() })
+        var directories: [String: String] = [:]
         var duplicates: [String] = []
-        for group in available {
-            let groupNames = [group.jpegURL?.lastPathComponent, group.heicURL?.lastPathComponent, group.rawURL?.lastPathComponent, "\(group.baseName).xmp"].compactMap { $0 }
-            for name in groupNames {
-                let key = name.lowercased()
-                if !names.insert(key).inserted { duplicates.append(name) }
+        let plan = try groups.map { group in
+            let images = [group.jpegURL, group.heicURL, group.rawURL].compactMap { $0 }
+            guard let first = images.first, ArchiveRequest.isValidFolderName(group.baseName) else {
+                throw ArchiveError.invalidSourceGroup(group.baseName)
             }
+            let parent = first.standardizedFileURL.deletingLastPathComponent()
+            guard parent.pathComponents.starts(with: sourcePath),
+                  group.allExistingURLs.allSatisfy({ $0.standardizedFileURL.deletingLastPathComponent() == parent })
+            else { throw ArchiveError.invalidSourceGroup(group.baseName) }
+            let subdirectories = preservingSubdirectories ? Array(parent.pathComponents.dropFirst(sourcePath.count)) : []
+            let planned = PlannedGroup(photo: group, subdirectories: subdirectories, imageURLs: images)
+            for depth in subdirectories.indices {
+                let path = subdirectories[...depth].joined(separator: "/")
+                let key = path.lowercased()
+                if files.contains(key) || directories[key].map({ $0 != path }) == true { duplicates.append(path) }
+                directories[key] = path
+            }
+            for path in planned.relativePaths {
+                let key = path.lowercased()
+                if directories[key] != nil || !files.insert(key).inserted { duplicates.append(path) }
+            }
+            return planned
         }
         if !duplicates.isEmpty { throw ArchiveError.conflicts(duplicates) }
+        return plan
     }
 
-    private func prepareManifest(
-        at stagingURL: URL,
-        source: URL,
-        projectName: String,
-        available: [PhotoGroup]
-    ) throws -> ExportManifest {
-        let expected = ExportManifest(
-            sourcePath: source.standardizedFileURL.path,
-            projectName: projectName,
-            plannedGroupIDs: available.map(\.id),
+    private func prepareManifest(for request: ArchiveRequest, plan: [PlannedGroup]) throws -> ExportManifest {
+        let staging = request.stagingURL
+        var expected = ExportManifest(
+            sourcePath: request.source.standardizedFileURL.path,
+            projectName: request.projectName,
+            plannedGroupIDs: plan.map { $0.photo.id },
+            preservesSubdirectories: request.preservesSubdirectories,
+            plannedPaths: plan.map(\.relativePaths),
             completedGroupIDs: []
         )
-        if fileManager.fileExists(atPath: stagingURL.path) {
-            guard let data = try? Data(contentsOf: manifestURL(in: stagingURL)),
-                  let existing = try? JSONDecoder().decode(ExportManifest.self, from: data),
-                  existing.version == expected.version,
+        if fileManager.fileExists(atPath: staging.path) {
+            let values = try staging.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw ArchiveError.resumeConflict(staging) }
+            let data: Data
+            do {
+                data = try Data(contentsOf: manifestURL(in: staging))
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile && fileManager.isWritableFile(atPath: staging.path) {
+                throw ArchiveError.resumeConflict(staging)
+            }
+            guard let existing = try? JSONDecoder().decode(ExportManifest.self, from: data),
                   existing.sourcePath == expected.sourcePath,
                   existing.projectName == expected.projectName,
-                  existing.plannedGroupIDs == expected.plannedGroupIDs
-            else { throw ArchiveError.resumeConflict(stagingURL) }
-            return existing
+                  existing.plannedGroupIDs == expected.plannedGroupIDs,
+                  (existing.version == 1 && !request.preservesSubdirectories) ||
+                    (existing.version == expected.version &&
+                     existing.preservesSubdirectories == expected.preservesSubdirectories &&
+                     existing.plannedPaths == expected.plannedPaths)
+            else { throw ArchiveError.resumeConflict(staging) }
+            if existing.version == 1 {
+                try removeLegacyScratch(in: staging)
+            }
+            expected.completedGroupIDs = existing.completedGroupIDs
+            return expected
         }
-        try fileManager.createDirectory(at: stagingURL, withIntermediateDirectories: false)
-        try writeManifest(expected, at: stagingURL)
-        return expected
-    }
-
-    private func manifestURL(in stagingURL: URL) -> URL {
-        stagingURL.appendingPathComponent(".影择-导出状态.json")
-    }
-
-    private func writeManifest(_ manifest: ExportManifest, at stagingURL: URL) throws {
-        let data = try JSONEncoder().encode(manifest)
-        try data.write(to: manifestURL(in: stagingURL), options: .atomic)
-    }
-
-    private func completedGroupMatches(_ group: PhotoGroup, in stagingURL: URL) throws -> Bool {
-        for source in [group.jpegURL, group.heicURL, group.rawURL].compactMap({ $0 }) {
-            let destination = stagingURL.appendingPathComponent(source.lastPathComponent)
-            guard fileManager.fileExists(atPath: destination.path),
-                  try filesMatch(source, destination)
-            else { return false }
-        }
-        let xmpURL = stagingURL.appendingPathComponent("\(group.baseName).xmp")
-        guard let written = try? Data(contentsOf: xmpURL) else { return false }
-        let expected = try xmpWriter.data(existingURL: group.xmpURL, rating: group.rating, label: group.colorLabel)
-        return written == expected
-    }
-
-    private func removeOutputs(for group: PhotoGroup, from stagingURL: URL) throws {
-        let names = [group.jpegURL, group.heicURL, group.rawURL]
-            .compactMap { $0?.lastPathComponent } + ["\(group.baseName).xmp"]
-        for name in names {
-            let url = stagingURL.appendingPathComponent(name)
-            if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
-        }
-    }
-
-    private func copyGroup(_ group: PhotoGroup, to projectURL: URL) throws {
-        let staging = projectURL.appendingPathComponent(".cull-stage-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: staging, withIntermediateDirectories: false)
-        var finalized: [URL] = []
         do {
-            for source in [group.jpegURL, group.heicURL, group.rawURL].compactMap({ $0 }) {
-                let staged = staging.appendingPathComponent(source.lastPathComponent)
-                try fileManager.copyItem(at: source, to: staged)
-                guard try filesMatch(source, staged) else { throw ArchiveError.verificationFailed(source.lastPathComponent) }
-            }
-            let xmpName = "\(group.baseName).xmp"
-            let xmpData = try xmpWriter.data(existingURL: group.xmpURL, rating: group.rating, label: group.colorLabel)
-            try xmpWriter.writeAtomically(xmpData, to: staging.appendingPathComponent(xmpName))
-
-            for staged in try fileManager.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil) {
-                let final = projectURL.appendingPathComponent(staged.lastPathComponent)
-                guard !fileManager.fileExists(atPath: final.path) else { throw ArchiveError.conflicts([final.lastPathComponent]) }
-                try fileManager.moveItem(at: staged, to: final)
-                finalized.append(final)
-            }
-            try fileManager.removeItem(at: staging)
+            try writeManifest(expected, in: staging)
         } catch {
-            for url in finalized { try? fileManager.removeItem(at: url) }
             try? fileManager.removeItem(at: staging)
             throw error
         }
+        return expected
+    }
+
+    private func checkCapacity(at destination: URL, remaining: [PlannedGroup]) throws {
+        let required = remaining.lazy.flatMap { $0.photo.allExistingURLs }.reduce(Int64(0)) { sum, url in
+            sum + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        let values = try? destination.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let available = values?.volumeAvailableCapacityForImportantUsage, available > 0, required > available {
+            throw ArchiveError.insufficientSpace(required: required, available: available)
+        }
+    }
+
+    private func manifestURL(in staging: URL) -> URL {
+        staging.appendingPathComponent(Self.manifestName)
+    }
+
+    private func writeManifest(_ manifest: ExportManifest, in staging: URL) throws {
+        try JSONEncoder().encode(manifest).write(to: manifestURL(in: staging), options: .atomic)
+    }
+
+    private func removeScratch(in staging: URL) throws {
+        let scratch = staging.appendingPathComponent(Self.scratchName, isDirectory: true)
+        if fileManager.fileExists(atPath: scratch.path) { try fileManager.removeItem(at: scratch) }
+    }
+
+    private func removeLegacyScratch(in staging: URL) throws {
+        let prefix = ".cull-stage-"
+        for item in try fileManager.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil) {
+            let name = item.lastPathComponent
+            if name.hasPrefix(prefix), UUID(uuidString: String(name.dropFirst(prefix.count))) != nil {
+                try fileManager.removeItem(at: item)
+            }
+        }
+    }
+
+    private func destination(for group: PlannedGroup, in staging: URL, create: Bool) throws -> URL {
+        var directory = staging
+        for component in group.subdirectories {
+            directory.appendPathComponent(component, isDirectory: true)
+            if create, !fileManager.fileExists(atPath: directory.path) {
+                try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
+            }
+            let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else {
+                throw ArchiveError.conflicts([directory.path])
+            }
+        }
+        return directory
+    }
+
+    private func completedGroupMatches(_ group: PlannedGroup, in staging: URL) throws -> Bool {
+        let output = try destination(for: group, in: staging, create: false)
+        for source in group.imageURLs {
+            let file = output.appendingPathComponent(source.lastPathComponent)
+            guard fileManager.fileExists(atPath: file.path), try filesMatch(source, file) else { return false }
+        }
+        let expected = try xmpWriter.data(existingURL: group.photo.xmpURL, rating: group.photo.rating, label: group.photo.colorLabel)
+        return try Data(contentsOf: output.appendingPathComponent(group.xmpName)) == expected
+    }
+
+    private func copyGroup(_ group: PlannedGroup, in staging: URL) throws -> [ArchiveFileFailure] {
+        let scratch = staging.appendingPathComponent(Self.scratchName, isDirectory: true)
+        let output: URL
+        do {
+            output = try destination(for: group, in: staging, create: true)
+            try fileManager.createDirectory(at: scratch, withIntermediateDirectories: false)
+        } catch {
+            return group.relativePaths.map { ArchiveFileFailure(path: $0, reason: error.localizedDescription) }
+        }
+        defer { try? fileManager.removeItem(at: scratch) }
+
+        var failures: [ArchiveFileFailure] = []
+        for source in group.imageURLs {
+            try Task.checkCancellation()
+            let name = source.lastPathComponent
+            let temporary = scratch.appendingPathComponent(name)
+            do {
+                try fileManager.copyItem(at: source, to: temporary)
+                guard try filesMatch(source, temporary) else { throw ArchiveError.verificationFailed }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                failures.append(ArchiveFileFailure(path: group.relativePath(for: name), reason: error.localizedDescription))
+            }
+        }
+
+        do {
+            let xmp = try xmpWriter.data(existingURL: group.photo.xmpURL, rating: group.photo.rating, label: group.photo.colorLabel)
+            try xmp.write(to: scratch.appendingPathComponent(group.xmpName), options: .atomic)
+        } catch {
+            failures.append(ArchiveFileFailure(path: group.relativePath(for: group.xmpName), reason: error.localizedDescription))
+        }
+        guard failures.isEmpty else { return failures }
+
+        var finalized: [URL] = []
+        for name in group.names {
+            let target = output.appendingPathComponent(name)
+            do {
+                if fileManager.fileExists(atPath: target.path) {
+                    let values = try target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                        throw ArchiveError.conflicts([group.relativePath(for: name)])
+                    }
+                    try fileManager.removeItem(at: target)
+                }
+                try fileManager.moveItem(at: scratch.appendingPathComponent(name), to: target)
+                finalized.append(target)
+            } catch {
+                for url in finalized { try? fileManager.removeItem(at: url) }
+                return [ArchiveFileFailure(path: group.relativePath(for: name), reason: error.localizedDescription)]
+            }
+        }
+        return []
     }
 
     private func filesMatch(_ lhs: URL, _ rhs: URL) throws -> Bool {
@@ -260,7 +403,10 @@ actor ArchiveService {
     private func digest(_ url: URL) throws -> SHA256.Digest {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        return try Self.digestChunks { try handle.read(upToCount: 4 * 1024 * 1024) }
+        return try Self.digestChunks {
+            try Task.checkCancellation()
+            return try handle.read(upToCount: 4 * 1024 * 1024)
+        }
     }
 
     // Read errors must abort verification rather than be treated as end of file.
@@ -271,5 +417,4 @@ actor ArchiveService {
         }
         return hasher.finalize()
     }
-
 }

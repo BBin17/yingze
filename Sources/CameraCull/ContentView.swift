@@ -2,8 +2,10 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var store: SessionStore
     @EnvironmentObject private var shortcutSettings: ShortcutSettings
+    @EnvironmentObject private var updater: AppUpdateController
     @State private var showingArchive = false
     @State private var showingRenameProject = false
     @State private var renameDraft = ""
@@ -30,6 +32,9 @@ struct ContentView: View {
         .animation(.snappy, value: store.undoNotice)
         .frame(minWidth: 940, minHeight: 620)
         .toolbar { toolbar }
+        .task {
+            if await updater.checkOnLaunch() { openWindow(id: AppUpdateView.windowID) }
+        }
         .alert("影择", isPresented: errorBinding) {
             Button("好", role: .cancel) { store.presentedError = nil }
         } message: {
@@ -378,7 +383,7 @@ struct ContentView: View {
                     Label("导出", systemImage: "square.and.arrow.up")
                 }
                     .appButton(.primary)
-                    .disabled(store.groups.isEmpty || store.isArchiving)
+                    .disabled((store.groups.isEmpty && store.session.pendingArchive == nil) || store.isArchiving)
                     .help("把最终精选、未淘汰照片、筛选结果或临时多选复制到新文件夹")
             }
         }
@@ -2101,10 +2106,25 @@ private struct ArchiveConfirmationView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var scope: ArchiveScope = .picks
     @State private var exportFolderName = ""
+    @State private var preservesSubdirectories = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("导出照片").font(.title2.bold())
+            if let pending = store.session.pendingArchive {
+                HStack {
+                    Text(pending.projectURL.path)
+                        .lineLimit(1).truncationMode(.middle)
+                        .help(pending.projectURL.path)
+                    Spacer()
+                    Button("继续上次导出") {
+                        dismiss()
+                        Task { await store.resumeArchive() }
+                    }
+                    .appButton(.secondary)
+                }
+                Divider()
+            }
             Picker("导出范围", selection: $scope) {
                 ForEach(ArchiveScope.allCases) { option in
                     Text("\(option.title)（\(store.groupsForArchive(scope: option).count)）")
@@ -2114,6 +2134,8 @@ private struct ArchiveConfirmationView: View {
             .pickerStyle(.radioGroup)
             LabeledContent("本次复制") { Text("\(store.groupsForArchive(scope: scope).count) 组") }
             LabeledContent("预计复制") { Text(ByteCountFormatter.string(fromByteCount: store.estimatedBytes(for: scope), countStyle: .file)) }
+            Toggle("保留来源子目录", isOn: $preservesSubdirectories)
+                .help("按相对于来源文件夹的目录结构导出，可区分不同子目录中的同名照片。")
             LabeledContent("文件夹名称") {
                 TextField("导出文件夹名称", text: $exportFolderName)
                     .textFieldStyle(.roundedBorder)
@@ -2134,7 +2156,9 @@ private struct ArchiveConfirmationView: View {
                 Spacer()
                 Button("开始导出") {
                     dismiss()
-                    Task { await store.archive(scope: scope, folderName: exportFolderName) }
+                    Task {
+                        await store.archive(scope: scope, folderName: exportFolderName, preservesSubdirectories: preservesSubdirectories)
+                    }
                 }
                 .appButton(.primary)
                 .disabled(store.groupsForArchive(scope: scope).isEmpty || store.session.destinationURL == nil || !folderNameIsValid)
@@ -2158,7 +2182,7 @@ private struct ArchiveConfirmationView: View {
 
     private var folderNameIsValid: Bool {
         let cleaned = exportFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !cleaned.isEmpty && !cleaned.contains("/")
+        return ArchiveRequest.isValidFolderName(cleaned)
     }
 
     private var exportURL: URL? {
@@ -2188,21 +2212,55 @@ private struct ArchiveReportView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Image(systemName: report.failedCount == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .font(.system(size: 44)).foregroundStyle(report.failedCount == 0 ? .green : .orange)
-            Text(report.failedCount == 0 ? "导出完成" : "导出完成，但有失败项").font(.title2.bold())
-            Text("成功复制 \(report.succeededCount) 组，失败 \(report.failedCount) 组；来源文件夹未改动。")
+            Image(systemName: report.isComplete ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 44)).foregroundStyle(report.isComplete ? .green : .orange)
+            Text(report.isComplete ? "导出完成" : "导出未完成").font(.title2.bold())
+            if report.isComplete {
+                Text("已导出 \(report.succeededCount) 组照片。")
+            } else {
+                Text("已校验 \(report.succeededCount) 组，失败 \(report.failedCount) 组，待处理 \(report.totalCount - report.outcomes.count) 组。")
+                if let issue = report.issue {
+                    Text(issue).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+            }
             if report.failedCount > 0 {
                 List(report.outcomes.filter { !$0.succeeded }) { outcome in
-                    VStack(alignment: .leading) { Text(outcome.baseName).bold(); Text(outcome.error ?? "未知错误").foregroundStyle(.secondary) }
-                }.frame(height: 160)
+                    ForEach(outcome.failures.indices, id: \.self) { index in
+                        let failure = outcome.failures[index]
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(failure.path).bold()
+                            Text(failure.reason).foregroundStyle(.secondary)
+                        }
+                        .textSelection(.enabled)
+                    }
+                }
+                .frame(height: 200)
+            }
+            if store.isArchiving {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(store.progressMessage)
+                }
+                .foregroundStyle(.secondary)
             }
             HStack {
                 Button("关闭") { dismiss() }
                     .appButton(.secondary)
                 Spacer()
-                Button("在 Finder 中显示") { store.revealProject(report.projectURL) }
-                    .appButton(.primary)
+                if report.isComplete {
+                    Button("在 Finder 中显示") { store.revealProject(report.location) }
+                        .appButton(.primary)
+                } else {
+                    if let log = report.logURL {
+                        Button("打开导出日志") { NSWorkspace.shared.open(log) }
+                            .appButton(.secondary)
+                    }
+                    if store.session.pendingArchive?.projectURL == report.request.projectURL {
+                        Button("继续导出") { Task { await store.resumeArchive(previousReport: report) } }
+                            .appButton(.primary)
+                            .disabled(store.isArchiving)
+                    }
+                }
             }
         }
         .padding(24)

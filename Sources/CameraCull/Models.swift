@@ -515,6 +515,7 @@ struct CullSession: Codable, Sendable {
     var groups: [PhotoGroup]
     var selectedGroupID: String?
     var updatedAt: Date
+    var pendingArchive: ArchiveRequest? = nil
 
     static let empty = CullSession(
         sourceURL: nil,

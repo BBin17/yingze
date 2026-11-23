@@ -28,6 +28,11 @@ enum ProjectRefreshMerger {
 
 @MainActor
 final class SessionStore: ObservableObject {
+    private struct MetadataRequest: Hashable {
+        let projectID: UUID
+        let groupID: String
+    }
+
     private var storageRecoveryBlocked = false
     @Published private(set) var session: CullSession = .empty
     @Published private(set) var projects: [ProjectSummary] = []
@@ -115,7 +120,7 @@ final class SessionStore: ObservableObject {
             preheatFullSizeImagesIfNeeded()
         }
     }
-    @Published var isIndexing = false
+    @Published private(set) var isIndexing = false
     @Published var isArchiving = false
     @Published var progressMessage = ""
     @Published var presentedError: String?
@@ -131,7 +136,7 @@ final class SessionStore: ObservableObject {
     private var autoCullTask: Task<Void, Never>?
 #endif
     private var undoNoticeTask: Task<Void, Never>?
-    private var metadataLoadingIDs: Set<String> = []
+    private var pendingMetadata: Set<MetadataRequest> = []
     private var selectionAnchorID: String?
     private let storageDirectoryOverride: URL?
 
@@ -209,83 +214,81 @@ final class SessionStore: ObservableObject {
             return
         }
         if currentProjectID != nil { saveNow() }
-        scanTask?.cancel()
+        cancelScan()
 #if AI_CULL
         autoCullTask?.cancel()
 #endif
         ratingFilters = []
         colorFilters = []
+        undoStack.removeAll()
+        dismissUndoNotice()
         session = CullSession.empty
         multiSelectedIDs.removeAll()
         selectionAnchorID = nil
         session.sourceURL = url
         session.projectName = cleanedName
-        currentProjectID = UUID()
+        let projectID = UUID()
+        currentProjectID = projectID
         photoCollection = .available
         showsProjectHome = false
-        isIndexing = true
-        progressMessage = "正在扫描…"
         saveNow()
+        startScan(directory: url, projectID: projectID, refreshing: false)
+    }
+
+    func refreshProject() {
+        guard let source = session.sourceURL, let projectID = currentProjectID, !isIndexing else { return }
+        startScan(directory: source, projectID: projectID, refreshing: true)
+    }
+
+    private func startScan(directory: URL, projectID: UUID, refreshing: Bool) {
+        isIndexing = true
+        progressMessage = refreshing ? "正在刷新项目…" : "正在扫描…"
 
         scanTask = Task {
+            guard !Task.isCancelled, currentProjectID == projectID else { return }
+            defer {
+                if !Task.isCancelled, currentProjectID == projectID {
+                    scanTask = nil
+                    isIndexing = false
+                }
+            }
             do {
-                var accumulated: [PhotoGroup] = []
-                let result = try await PhotoIndexer().scan(directory: url) { batch in
+                let result = try await PhotoIndexer().scan(directory: directory) { batch in
                     await MainActor.run {
-                        accumulated.append(contentsOf: batch)
-                        self.session.groups = accumulated
-                        if self.session.selectedGroupID == nil { self.session.selectedGroupID = accumulated.first?.id }
-                        self.progressMessage = "已发现 \(accumulated.count) 组照片"
+                        guard !Task.isCancelled, self.currentProjectID == projectID else { return }
+                        if refreshing {
+                            if let last = batch.last { self.progressMessage = "正在刷新…\(last.baseName)" }
+                        } else {
+                            self.session.groups.append(contentsOf: batch)
+                            self.ensureVisibleSelection()
+                            self.progressMessage = "已发现 \(self.session.groups.count) 组照片"
+                        }
                     }
                 }
-                session.groups = result
-                session.selectedGroupID = result.first?.id
-                isIndexing = false
-                progressMessage = "共 \(result.count) 组照片"
+                guard !Task.isCancelled, currentProjectID == projectID else { return }
+                session.groups = ProjectRefreshMerger.merge(scanned: result, previous: session.groups)
+                let validIDs = Set(session.groups.map(\.id))
+                multiSelectedIDs.formIntersection(validIDs)
+                selectionAnchorID = selectionAnchorID.flatMap { validIDs.contains($0) ? $0 : nil }
+                ensureVisibleSelection()
+                progressMessage = refreshing ? "刷新完成，共 \(result.count) 组照片" : "共 \(result.count) 组照片"
                 scheduleSave()
             } catch is CancellationError {
-                isIndexing = false
+                return
             } catch {
-                isIndexing = false
+                guard !Task.isCancelled, currentProjectID == projectID else { return }
+                progressMessage = refreshing ? "刷新未完成" : "扫描未完成"
                 presentedError = error.localizedDescription
             }
         }
     }
 
-    func refreshProject() {
-        guard let source = session.sourceURL, !isIndexing else { return }
-        scanTask?.cancel()
-        let previousGroups = session.groups
-        let previousFocusedID = session.selectedGroupID
-        let previousSelectedIDs = multiSelectedIDs
-        isIndexing = true
-        progressMessage = "正在刷新项目…"
-
-        scanTask = Task {
-            do {
-                let result = try await PhotoIndexer().scan(directory: source) { batch in
-                    await MainActor.run {
-                        if let last = batch.last {
-                            self.progressMessage = "正在刷新…\(last.baseName)"
-                        }
-                    }
-                }
-                session.groups = ProjectRefreshMerger.merge(scanned: result, previous: previousGroups)
-                let validIDs = Set(session.groups.map(\.id))
-                multiSelectedIDs = previousSelectedIDs.intersection(validIDs)
-                session.selectedGroupID = previousFocusedID.flatMap { validIDs.contains($0) ? $0 : nil }
-                ensureVisibleSelection()
-                isIndexing = false
-                progressMessage = "刷新完成，共 \(result.count) 组照片"
-                scheduleSave()
-            } catch is CancellationError {
-                isIndexing = false
-            } catch {
-                isIndexing = false
-                progressMessage = "刷新未完成"
-                presentedError = error.localizedDescription
-            }
-        }
+    private func cancelScan() {
+        guard let scanTask else { return }
+        scanTask.cancel()
+        self.scanTask = nil
+        isIndexing = false
+        progressMessage = ""
     }
 
     func focus(_ id: String) {
@@ -540,9 +543,15 @@ final class SessionStore: ObservableObject {
             presentedError = "项目的来源文件夹已经不可用：\(project.sourceURL.path)"
             return
         }
+        if currentProjectID == id, isIndexing {
+            showsProjectHome = false
+            return
+        }
         if currentProjectID != id, currentProjectID != nil { saveNow() }
         do {
-            session = try readSession(id: id)
+            let saved = try readSession(id: id)
+            cancelScan()
+            session = saved
             discardOutdatedAnalysis()
             currentProjectID = id
             try writeSession(session, id: id)
@@ -556,6 +565,7 @@ final class SessionStore: ObservableObject {
         multiSelectedIDs.removeAll()
         selectionAnchorID = nil
         undoStack.removeAll()
+        dismissUndoNotice()
         photoCollection = .available
         browserMode = .grid
         showsProjectHome = false
@@ -604,6 +614,7 @@ final class SessionStore: ObservableObject {
             }
             projects.removeAll { $0.id == id }
             if currentProjectID == id {
+                cancelScan()
                 currentProjectID = nil
                 session = .empty
                 multiSelectedIDs.removeAll()
@@ -675,42 +686,98 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    func archive(scope: ArchiveScope, folderName: String) async {
-        guard let source = session.sourceURL, let destination = session.destinationURL else {
+    func archive(scope: ArchiveScope, folderName: String, preservesSubdirectories: Bool) async {
+        guard !isArchiving else { return }
+        guard let projectID = currentProjectID, let source = session.sourceURL, let destination = session.destinationURL else {
             presentedError = "请选择来源和导出文件夹。"
             return
         }
         let cleanName = folderName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty, !cleanName.contains("/") else {
-            presentedError = "请输入不包含斜杠的导出文件夹名称。"
+        guard ArchiveRequest.isValidFolderName(cleanName) else {
+            presentedError = ArchiveError.invalidFolderName.localizedDescription
             return
         }
+        let request = ArchiveRequest(
+            source: source,
+            destinationRoot: destination,
+            projectName: cleanName,
+            groups: groupsForArchive(scope: scope),
+            preservesSubdirectories: preservesSubdirectories
+        )
+        await runArchive(request, projectID: projectID, replacing: session.pendingArchive)
+    }
 
+    func resumeArchive(previousReport: ArchiveReport? = nil) async {
+        guard !isArchiving, let projectID = currentProjectID, let request = session.pendingArchive else { return }
+        await runArchive(request, projectID: projectID, previousReport: previousReport)
+    }
+
+    private func runArchive(
+        _ request: ArchiveRequest,
+        projectID: UUID,
+        replacing previousRequest: ArchiveRequest? = nil,
+        previousReport: ArchiveReport? = nil
+    ) async {
         isArchiving = true
+        defer { isArchiving = false }
+        session.pendingArchive = request
+        saveNow()
         progressMessage = "正在预检…"
+
+        let report: ArchiveReport
+        let pending: ArchiveRequest?
         do {
-            let service = ArchiveService()
-            let report = try await service.execute(
-                source: source,
-                destinationRoot: destination,
-                projectName: cleanName,
-                groups: groupsForArchive(scope: scope)
-            ) { message in
-                Task { @MainActor in self.progressMessage = message }
+            report = try await ArchiveService().execute(request) { message in
+                Task { @MainActor in
+                    guard self.isArchiving, self.currentProjectID == projectID else { return }
+                    self.progressMessage = message
+                }
             }
-            for outcome in report.outcomes {
-                guard let index = session.groups.firstIndex(where: { $0.id == outcome.groupID }) else { continue }
-                session.groups[index].operationState = outcome.succeeded ? .archived : .failed
-                session.groups[index].errorMessage = outcome.error
-            }
-            archiveReport = report
-            progressMessage = "导出完成"
-            scheduleSave()
+            pending = report.isComplete ? nil : request
         } catch {
-            presentedError = error.localizedDescription
-            progressMessage = "导出未完成"
+            report = ArchiveReport(
+                request: request, outcomes: previousReport?.outcomes ?? [],
+                logURL: nil, isComplete: false, issue: error.localizedDescription
+            )
+            if let archiveError = error as? ArchiveError, !archiveError.canRetry {
+                pending = previousRequest
+            } else {
+                pending = request
+            }
         }
-        isArchiving = false
+        saveArchiveResult(report, pending: pending, projectID: projectID)
+        if currentProjectID == projectID {
+            archiveReport = report
+            progressMessage = report.isComplete ? "导出完成" : "导出未完成"
+        }
+    }
+
+    private func saveArchiveResult(_ report: ArchiveReport, pending: ArchiveRequest?, projectID: UUID) {
+        func update(_ session: inout CullSession) {
+            session.pendingArchive = pending
+            let outcomes = Dictionary(report.outcomes.map { ($0.groupID, $0) }, uniquingKeysWith: { first, _ in first })
+            for index in session.groups.indices {
+                guard let outcome = outcomes[session.groups[index].id] else { continue }
+                if report.isComplete || !outcome.succeeded {
+                    session.groups[index].operationState = outcome.succeeded ? .archived : .failed
+                    session.groups[index].errorMessage = outcome.error
+                }
+            }
+        }
+        if currentProjectID == projectID {
+            update(&session)
+            saveNow()
+        } else if projects.contains(where: { $0.id == projectID }) {
+            do {
+                var saved = try readSession(id: projectID, notify: false)
+                update(&saved)
+                try writeSession(saved, id: projectID)
+                upsertProjectSummary(id: projectID, session: saved)
+                try saveProjectIndex()
+            } catch {
+                presentedError = "无法保存导出记录：\(error.localizedDescription)"
+            }
+        }
     }
 
     func revealProject(_ url: URL) {
@@ -811,19 +878,25 @@ final class SessionStore: ObservableObject {
     }
 
     private func loadMetadataIfNeeded(for id: String) {
-        guard !metadataLoadingIDs.contains(id),
+        guard let projectID = currentProjectID,
               let group = session.groups.first(where: { $0.id == id }),
               !group.hasCaptureMetadata
         else { return }
-        metadataLoadingIDs.insert(id)
+        let request = MetadataRequest(projectID: projectID, groupID: id)
+        guard pendingMetadata.insert(request).inserted else { return }
         Task {
-            let enriched = await Task.detached(priority: .utility) {
-                PhotoMetadataReader.enrich(group)
+            let metadata = await Task.detached(priority: .utility) {
+                PhotoMetadataReader.metadata(for: group)
             }.value
-            metadataLoadingIDs.remove(id)
-            guard enriched.hasCaptureMetadata,
-                  let index = session.groups.firstIndex(where: { $0.id == id })
+            pendingMetadata.remove(request)
+            guard currentProjectID == projectID, let metadata,
+                  let index = session.groups.firstIndex(where: { $0.id == id }),
+                  !session.groups[index].hasCaptureMetadata,
+                  session.groups[index].renderedPreviewURL == group.renderedPreviewURL,
+                  session.groups[index].rawURL == group.rawURL
             else { return }
+            let enriched = metadata.applying(to: session.groups[index])
+            guard enriched.hasCaptureMetadata else { return }
             session.groups[index] = enriched
             scheduleSave()
         }

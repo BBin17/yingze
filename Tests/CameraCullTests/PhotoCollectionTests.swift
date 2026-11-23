@@ -284,6 +284,146 @@ struct ProjectSessionTests {
         #expect(try Data(contentsOf: record) == Data("invalid json".utf8))
     }
 
+    @Test("切换项目后，上一项目的扫描结果不会串入当前项目")
+    @MainActor
+    func switchingProjectsDiscardsPreviousScan() async throws {
+        let root = try temporaryScanDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try makeScanSource(in: root, named: "First", photos: ["A"])
+        let second = try makeScanSource(in: root, named: "Second", photos: ["B"])
+        let storage = root.appendingPathComponent("Sessions", isDirectory: true)
+        let store = SessionStore(storageDirectory: storage)
+
+        store.openSource(first, projectName: "A 项目")
+        try await waitForScan(store)
+        let firstID = try #require(store.currentProjectID)
+        store.openSource(second, projectName: "B 项目")
+        try await waitForScan(store)
+        let secondID = try #require(store.currentProjectID)
+        store.setRating(3)
+        store.continueProject(firstID)
+
+        store.refreshProject()
+        try #require(store.isIndexing)
+        store.showProjectHome()
+        store.continueProject(secondID)
+        #expect(!store.isIndexing)
+        try await waitForScan(store)
+
+        #expect(store.currentProjectID == secondID)
+        #expect(store.session.sourceURL == second)
+        #expect(store.groups.map(\.baseName) == ["B"])
+        #expect(store.groups.first?.rating == 3)
+        store.showProjectHome()
+        let reopened = SessionStore(storageDirectory: storage)
+        #expect(reopened.groups.map(\.baseName) == ["B"])
+        #expect(reopened.groups.first?.rating == 3)
+        reopened.continueProject(firstID)
+        #expect(reopened.groups.map(\.baseName) == ["A"])
+    }
+
+    @Test("刷新保留扫描期间的新评分、精选、颜色和选择")
+    @MainActor
+    func refreshingKeepsEditsMadeDuringScan() async throws {
+        let root = try temporaryScanDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try makeScanSource(in: root, named: "Source", photos: ["A", "B"])
+        let storage = root.appendingPathComponent("Sessions", isDirectory: true)
+        let store = SessionStore(storageDirectory: storage)
+        store.openSource(source, projectName: "刷新测试")
+        try await waitForScan(store)
+        let editedID = try #require(store.groups.first { $0.baseName == "B" }?.id)
+        try Data().write(to: source.appendingPathComponent("C.JPG"))
+
+        store.refreshProject()
+        try #require(store.isIndexing)
+        store.selectPhotos(editedID)
+        store.setRating(4)
+        store.setColor(.green)
+        store.setPickState(.keep)
+        try await waitForScan(store)
+
+        #expect(store.groups.map(\.baseName) == ["A", "B", "C"])
+        #expect(store.selectedGroup?.id == editedID)
+        #expect(store.multiSelectedIDs == [editedID])
+        #expect(store.selectedGroup?.rating == 4)
+        #expect(store.selectedGroup?.colorLabel == .green)
+        #expect(store.selectedGroup?.pickState == .keep)
+        store.showProjectHome()
+        let reopened = SessionStore(storageDirectory: storage)
+        #expect(reopened.groups.first { $0.id == editedID }?.rating == 4)
+    }
+
+    @Test("后台读取照片元数据时保留刚修改的评分")
+    @MainActor
+    func metadataLoadKeepsRatingChanges() async throws {
+        let root = try temporaryScanDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try makeScanSource(in: root, named: "Source", photos: ["A"])
+        let store = SessionStore(storageDirectory: root.appendingPathComponent("Sessions", isDirectory: true))
+        store.openSource(source, projectName: "评分测试")
+        try await waitForScan(store)
+        let group = try #require(store.selectedGroup)
+        try #require(!group.hasCaptureMetadata)
+        let context = try #require(CGContext(
+            data: nil, width: 16, height: 10, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ))
+        let image = try #require(context.makeImage())
+        let file = source.appendingPathComponent("A.JPG")
+        let destination = try #require(CGImageDestinationCreateWithURL(file as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        try #require(CGImageDestinationFinalize(destination))
+
+        store.focus(group.id)
+        store.setRating(4)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while store.selectedGroup?.hasCaptureMetadata != true, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(store.selectedGroup?.pixelWidth == 16)
+        #expect(store.selectedGroup?.rating == 4)
+    }
+
+    @Test("来源目录断开时刷新报错并保留记录，恢复后可以重试")
+    @MainActor
+    func unavailableSourceDoesNotClearSavedProject() async throws {
+        let root = try temporaryScanDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try makeScanSource(in: root, named: "Source", photos: ["A"])
+        let unavailable = root.appendingPathComponent("Disconnected", isDirectory: true)
+        let storage = root.appendingPathComponent("Sessions", isDirectory: true)
+        let store = SessionStore(storageDirectory: storage)
+        store.openSource(source, projectName: "来源断开测试")
+        try await waitForScan(store)
+        store.setRating(5)
+        store.setColor(.red)
+        store.setPickState(.keep)
+        store.showProjectHome()
+        let projectID = try #require(store.currentProjectID)
+        store.continueProject(projectID)
+        let previousGroups = store.groups
+        try FileManager.default.moveItem(at: source, to: unavailable)
+
+        store.refreshProject()
+        try await waitForScan(store)
+        #expect(store.presentedError?.contains(source.path) == true)
+        #expect(store.progressMessage == "刷新未完成")
+        #expect(store.groups == previousGroups)
+        store.showProjectHome()
+        let reopened = SessionStore(storageDirectory: storage)
+        #expect(reopened.groups == previousGroups)
+
+        try FileManager.default.moveItem(at: unavailable, to: source)
+        try Data().write(to: source.appendingPathComponent("B.JPG"))
+        reopened.continueProject(projectID)
+        reopened.refreshProject()
+        try await waitForScan(reopened)
+        #expect(reopened.presentedError == nil)
+        #expect(reopened.groups.map(\.baseName) == ["A", "B"])
+        #expect(reopened.groups.first == previousGroups.first)
+    }
+
     @Test("项目索引丢失时从备份恢复")
     @MainActor
     func restoresMissingIndexFromBackup() throws {
@@ -353,5 +493,29 @@ struct ProjectSessionTests {
         let store = SessionStore(storageDirectory: root)
         #expect(store.comparisonGroups(limit: 2).map(\.id) == ["3", "4"])
         #expect(store.comparisonGroups(limit: 4).map(\.id) == ["1", "2", "3", "4"])
+    }
+
+    private func temporaryScanDirectory() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("CameraCullScan-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func makeScanSource(in root: URL, named name: String, photos: [String]) throws -> URL {
+        let source = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        for photo in photos {
+            try Data().write(to: source.appendingPathComponent("\(photo).JPG"))
+        }
+        return source
+    }
+
+    @MainActor
+    private func waitForScan(_ store: SessionStore) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while store.isIndexing, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(!store.isIndexing)
     }
 }
